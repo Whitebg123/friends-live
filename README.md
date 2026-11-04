@@ -1,5 +1,11 @@
 # Friends Live · 双人投屏
 
+公开源码：[Whitebg123/friends-live](https://github.com/Whitebg123/friends-live)
+
+[在 Render 一键部署](https://render.com/deploy?repo=https%3A%2F%2Fgithub.com%2FWhitebg123%2Ffriends-live)
+
+点击上方链接，登录自己的 Render 账号，核对免费单实例服务后部署。项目自带 render.yaml，不需要设置密码或填写密钥。GitHub 仓库用于保存代码；实际网站网址会在 Render 部署完成后生成。
+
 黑底、灰白文字，无装饰首页。输入昵称即登录到同一个共享空间，没有密码、邀请码或房主分享授权。两个人都能独立开始/停止投屏，互不影响，最多同时在线两人。聊天同步显示为画面弹幕，并支持独立的浏览器弹幕画中画小窗。
 
 ## 本地运行
