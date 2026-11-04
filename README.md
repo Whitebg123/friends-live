@@ -1,0 +1,120 @@
+# Friends Live · 双人投屏
+
+黑底、灰白文字，无装饰首页。输入昵称即登录到同一个共享空间，没有密码、邀请码或房主分享授权。两个人都能独立开始/停止投屏，互不影响，最多同时在线两人。聊天同步显示为画面弹幕，并支持独立的浏览器弹幕画中画小窗。
+
+## 本地运行
+
+安装 Node.js 22.12+ 或 24，随后在本目录打开 PowerShell：
+
+```powershell
+npm.cmd ci
+npm.cmd run build
+npm.cmd start
+```
+
+打开 http://localhost:3000 ，输入昵称进入。朋友访问同一个部署网址即可。屏幕捕获仍必须由本人点击「开始投屏」并在浏览器原生选择器授权，不能自动绕过授权。停止本地服务按 Ctrl+C。
+
+没有 Node/npm 时，执行 `winget install --id OpenJS.NodeJS.LTS --exact`，安装后重新打开 PowerShell。开发时分别运行 `npm.cmd run dev` 和 `npm.cmd run dev:ui`，访问 Vite 地址。
+
+## 弹幕小窗（无需安装程序）
+
+在新版桌面 Chrome / Edge 中进入网站，点击「弹幕小窗」。网页使用 Document Picture-in-Picture API 请求 320×180 的置顶窗口，显示最近六条聊天消息并自动滚动。可以拖到屏幕边角，在无边框游戏时查看；具体游戏是否遮挡它仍需实测。最小尺寸和标题栏由浏览器决定。
+
+这是真实的浏览器画中画，不是页面内模拟浮层。必须通过 HTTPS 或 localhost 使用，必须由本人点击打开。浏览器不支持时明确提示，不会用普通弹窗冒充置顶小窗。网页保持打开，关闭主网页、刷新或退出会结束画中画。
+
+**浏览器画中画不提供可靠的桌面半透明、鼠标穿透控制。当前版本使用黑底白字，不能承诺透过窗口看到游戏。** 它可以置顶，但和你要求的系统级半透明浮窗存在这个区别；不需要安装本地小程序。没有实现游戏进程注入或反作弊绕过。
+
+文档：[Document PiP API](https://developer.mozilla.org/en-US/docs/Web/API/Document_Picture-in-Picture_API)、[窗口尺寸与限制](https://developer.chrome.com/docs/web-platform/document-picture-in-picture)。
+
+## 上传 GitHub
+
+在 https://github.com/new 创建空仓库，名字可用 `friends-live`，不要勾选 README、License、.gitignore。在本目录打开 PowerShell：
+
+```powershell
+$repoUrl = Read-Host '粘贴你刚创建的 GitHub 仓库 HTTPS 地址'
+git init
+git branch -M main
+git add .
+git commit -m "Build two-way screen sharing with chat and PiP"
+git remote add origin $repoUrl
+git push -u origin main
+git rev-parse HEAD
+```
+
+按 Git 窗口完成账号登录，不需要绑定 Codex。Git 未安装时：`winget install --id Git.Git --exact`，安装后重开终端。缺少作者身份时，按 Git 提示设置当前仓库的 `user.name` 和 `user.email`。已有仓库请合并修改，不强推。
+
+如果你已上传上一版，用本版本完整文件覆盖源码，并删除 Render 中旧的 SITE_PASSWORD 环境变量（新代码不再读取它）。在原仓库执行 `git add .`、`git commit -m "Add simultaneous sharing, chat and PiP"`、`git push` 即可更新。
+
+## Render
+
+1. 在 https://dashboard.render.com 选择 New → Blueprint，授权自己的 GitHub 仓库，使用本项目根目录 `render.yaml`。
+2. 创建单个 Free Node Web Service，不设网站密码。`PUBLIC_ORIGIN` 可以先留空；部署后可填实际 `https://你的服务名.onrender.com`（末尾没有 `/`）。三个 TURN 变量不用时留空或删除。
+3. 等待部署，访问 `https://你的服务名.onrender.com/health`，应返回 `{"ok":true}`。
+4. 双方直接打开相同的网址，各自输入昵称进入。
+
+手动建 Web Service 时：
+
+| 设置 | 值 |
+| --- | --- |
+| Runtime | Node |
+| Build Command | `npm ci --include=dev && npm run build` |
+| Start Command | `npm start` |
+| Health Check | `/health` |
+| NODE_ENV | `production` |
+| Instances | 1 |
+
+Node 监听 `0.0.0.0` 和 Render 自动提供的 PORT，HTTP/WSS 共用一个服务。没有数据库，不要扩容多实例。免费服务冷启动时等待即可，没有防休眠请求。参考：[Render Node 部署](https://render.com/docs/deploy-node-express-app)、[WebSocket](https://render.com/docs/websocket)。
+
+## 配置
+
+| 环境变量 | 作用 |
+| --- | --- |
+| PORT | 本地默认 3000，Render 自动注入 |
+| NODE_ENV | 部署时 production |
+| PUBLIC_ORIGIN | 可选，精确匹配网页 Origin，用于校验 WebSocket 来源 |
+| TURN_URLS | 可选，外部 TURN 地址，多个用英文逗号分隔 |
+| TURN_USERNAME | 外部 TURN 用户名 |
+| TURN_CREDENTIAL | 外部 TURN 凭据 |
+
+不再存在 SITE_PASSWORD。任何知道网址的人都能用昵称进入空闲席位；昵称仅为显示名称，不验证真实身份。服务端仍生成高熵会话令牌用于恢复身份、限制对自己的投屏控制；另一个人无法通过冒用昵称接管现有会话。第三人仍不能加入。
+
+## 媒体与聊天
+
+- 单个双向 WebRTC 连接，固定协商双向视频、系统音频、麦克风三个 transceiver；两人各上传一份自己的视频。唯一的 Offer 发起者只负责避免协商冲突，不限制另一人的投屏权限。
+- 默认捕获目标 1920×1080 / 60 FPS，`contentHint="motion"`。视频上限默认每方向 15 Mbps，可改 8/25/40 Mbps；实际画质与帧率取决于设备和网络，不保证 1080p60。
+- 每个画面下显示对应发送/接收的真实分辨率、FPS、区间视频码率。底部显示 ICE RTT 和 P2P/TURN；没有统计时显示 `—`。
+- 系统音轨和麦克风独立传输、独立播放，自己的预览静音。双方可以同时说话，没有投屏时也能语音。系统音频取决于浏览器和分享源；未捕获会提示，音频读取失败时可退回仅视频。
+- STUN 无法保证所有网络直连；失败可点击重连，仍失败时配置外部 TURN。不要在此 Render 服务中部署 TURN。TURN 需支持双方使用的网络，凭据对认证后的浏览器可见，应控制供应商额度与有效期。
+- 刷新恢复昵称和会话；刷新后要重新授权分享自己的屏幕。另一个人的分享不因你停止自己的投屏而结束。断线席位保留 30 秒；明确退出立即释放。先进入的人退出不踢走另一人。
+- 聊天每条最多 300 字，每人每 10 秒最多 8 条。使用服务端身份和时间戳，不信任前端冒用的昵称。React 按文本渲染内容，不执行 HTML。聊天历史内存保留最近 100 条，全部退出或服务重启后清空；没有数据库和录屏功能。
+- 网页弹幕可以单独开关；画中画内为紧凑的消息列表。浏览器切到后台时，实际画中画刷新速度仍可能受浏览器资源策略影响。
+
+## 验证
+
+```powershell
+npm.cmd run build
+npm.cmd test
+npm.cmd run test:browser
+```
+
+浏览器测试使用本机 Microsoft Edge；其他平台先执行 `npx.cmd playwright install chromium`。测试包括无密码昵称进入、第三人拒绝、两人同时投屏、双向音轨接收、聊天/弹幕、独立停止、刷新、媒体重连和移动布局。测试媒体是 canvas 和振荡器产生的合成视频/音频，经过真实 RTCPeerConnection 传输，不代表已验证真实桌面授权、真实系统声音和跨网络质量。
+
+实际 PiP API 在可用的浏览器中测试开窗与聊天同步；无边框游戏遮挡、长期稳定性、真实跨网络 1080p60、不同浏览器最小尺寸及冷启动需要人工实测。测试截图保存在 `test-results/`（Git 忽略）。
+
+## 文件
+
+```text
+server/index.js       单共享空间、会话、两人限制、聊天、信令
+src/live.js           双向 WebRTC、捕获、音频、重连、统计
+src/main.jsx          昵称登录、双画面、聊天、弹幕、文档画中画
+src/style.css         纯黑灰界面和响应布局
+test/server.test.js   服务端集成测试
+test/browser.test.js  双浏览器实际 WebRTC 流程
+render.yaml          单实例部署
+.env.example         可选配置（没有密码）
+package*.json        依赖与锁定文件
+```
+
+源码支持 GitHub 托管及 Render 单服务部署。发布代码不会自动创建 Render 服务；按上方 Blueprint 步骤连接仓库即可。可选 PUBLIC_ORIGIN 和 TURN 变量部署后在 Render Environment 中按需添加，初次部署无需填写任何密码或密钥。
+
+本次本机验证：构建成功；10 项服务端测试通过，双浏览器综合测试通过（合计 11 项）。Edge 实际文档画中画开窗并同步接收到新聊天消息。真实游戏覆盖、真实屏幕捕获与跨网络质量仍待人工实测。
