@@ -30,7 +30,7 @@ export class Peer {
   async syncTracks(pc = this.pc) {
     if (!pc || pc.connectionState === 'closed') return;
     const display = this.live.displayApproved ? this.live.display : null;
-    const tracks = [display?.getVideoTracks()[0], this.live.audio.track('system', display?.getAudioTracks()[0]), this.live.audio.track('mic', this.live.micStream?.getAudioTracks()[0])];
+    const tracks = [display?.getVideoTracks()[0], display?.getAudioTracks()[0], this.live.micStream?.getAudioTracks()[0]];
     const ts = pc.getTransceivers();
     try { for (let i = 0; i < 3; i++) if (ts[i]) await ts[i].sender.replaceTrack(tracks[i] || null); }
     catch (e) { if (pc !== this.pc || pc.connectionState === 'closed') { if (this.pc && this.pc !== pc) await this.syncTracks(this.pc); return; } throw e; }
@@ -67,7 +67,13 @@ export class Peer {
   }
   async setVideoQuality() {
     const sender = this.pc?.getSenders().find(s => s.track?.kind === 'video'); if (!sender || !this.pc.currentLocalDescription || !this.pc.currentRemoteDescription || this.pc.signalingState !== 'stable') return;
-    try { const p = sender.getParameters(); if (!p.encodings?.length) return; p.encodings[0].maxBitrate = 40000000; delete p.encodings[0].maxFramerate; p.degradationPreference = 'maintain-resolution'; await sender.setParameters(p); } catch { this.live.emit({ notice: '发送参数未被浏览器接受，使用浏览器自适应设置' }); }
+    try {
+      const p = sender.getParameters(); if (!p.encodings?.length) return;
+      const {width,height,maxBitrate,priority}=this.live.quality, actual=sender.track.getSettings();
+      p.encodings[0].maxBitrate=maxBitrate;
+      p.encodings[0].scaleResolutionDownBy=Math.max(1,(actual.width||width)/width,(actual.height||height)/height);
+      delete p.encodings[0].maxFramerate; p.degradationPreference=priority; await sender.setParameters(p);
+    } catch { this.live.emit({ notice: '发送参数未被浏览器接受，使用浏览器自适应设置' }); }
   }
   async stats() {
     const pc = this.pc; if (!pc) return; const report = await pc.getStats(); if (pc !== this.pc) return;

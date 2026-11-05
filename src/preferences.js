@@ -1,10 +1,10 @@
 const KEY = 'friends-live-preferences-v1';
+import { videoQuality } from './video-quality.js';
 const level = (v, fallback = 1) => typeof v === 'number' && v >= 0 && v <= 1 ? v : fallback;
 export function loadPreferences() {
   let p; try { p = JSON.parse(localStorage.getItem(KEY)) || {}; } catch { p = {}; }
   return {
-    micVolume: level(p.micVolume, level(p.sendVolume)),
-    systemVolume: level(p.systemVolume, level(p.sendVolume)),
+    quality: Object.hasOwn(videoQuality, p.quality) ? p.quality : 'highest',
     receiveVolume: level(p.receiveVolume),
     peerVolumes: Object.fromEntries(Object.entries(p.peerVolumes || {}).filter(([id, value]) => /^[\w-]{32}$/.test(id) && value && typeof value === 'object').slice(-64).map(([id, value]) => [id, { mic: level(value.mic), system: level(value.system) }])),
     background: typeof p.background === 'string' && /^data:image\/(webp|png|jpeg);base64,/.test(p.background) && p.background.length < 2800000 ? p.background : ''

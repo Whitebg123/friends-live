@@ -1,11 +1,10 @@
 import { Peer } from './peer.js';
 import { loadPreferences, savePreferences } from './preferences.js';
-import { OutgoingAudio } from './audio.js';
+import { videoQuality, captureConstraints } from './video-quality.js';
 export class Live {
   constructor(update) {
     this.update = update; this.state = { room: null, status: '正在连接', messages: [], remotePeers: {}, stats: {} };
     this.preferences = loadPreferences();
-    this.audio = new OutgoingAudio({ mic: this.preferences.micVolume, system: this.preferences.systemVolume });
     this.peers = new Map(); this.pending = new Map(); this.latencyPending = new Map(); this.retry = 0; this.emit({ preferences: this.preferences, latency:{} }); this.open();
     this.statsTimer = setInterval(() => this.stats().catch(() => {}), 1500);
     this.pingTimer = setInterval(() => this.measureLatency(), 4000);
@@ -82,13 +81,20 @@ export class Live {
   closePeer() { for (const p of this.peers.values()) p.dispose(); this.peers.clear(); this.emit({ remotePeers: {} }); }
   async syncTracks() { await Promise.all([...this.peers.values()].map(p => p.syncTracks())); }
   preference(patch) { const next = { ...this.preferences, ...patch }; try { savePreferences(next); } catch { throw Error('浏览器无法保存设置，请检查存储权限或清理网站存储空间'); } this.preferences = next; this.emit({ preferences: next }); }
+  get quality() { return videoQuality[this.preferences.quality]; }
+  async setQuality(quality) {
+    if (!Object.hasOwn(videoQuality, quality)) return;
+    this.preference({ quality });
+    const track = this.display?.getVideoTracks()[0];
+    if (track) await track.applyConstraints(captureConstraints(this.quality)).catch(() => {});
+    await Promise.all([...this.peers.values()].map(p => p.setVideoQuality()));
+  }
   setVolume(channel, value, memberId) {
     const level = Math.max(0, Math.min(1, Number(value)));
     if (memberId) {
       const previous = this.preferences.peerVolumes;
       this.preference({ peerVolumes: Object.fromEntries([...Object.entries(previous).filter(([id]) => id !== memberId), [memberId, { mic: 1, system: 1, ...previous[memberId], [channel]: level }]].slice(-64)) });
     } else if (channel === 'receive') this.preference({ receiveVolume: level });
-    else { this.preference({ [channel === 'mic' ? 'micVolume' : 'systemVolume']: level }); this.audio.setVolume(channel, level); }
   }
   async retryMedia() { await Promise.all([...this.peers.values()].map(p => this.selfId < p.id ? p.offer() : Promise.resolve(p.relay({ kind: 'ready' })))); }
   async stats() { await Promise.all([...this.peers.values()].map(p => p.stats())); }
@@ -109,8 +115,7 @@ export class Live {
     this.capturing = true;
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) throw Error('请使用桌面 Chrome / Edge，通过 HTTPS 或 localhost 打开');
-      this.audio.ensure();
-      const video = { width: { ideal: 1920 }, height: { ideal: 1080 } };
+      const video = captureConstraints(this.quality);
       let stream;
       try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include' }); }
       catch (e) { if (!['NotReadableError', 'OverconstrainedError'].includes(e.name)) throw e; stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false }); }
@@ -122,25 +127,24 @@ export class Live {
     } catch (e) { this.stopLocal(); await this.syncTracks().catch(() => {}); if (this.state.connected) this.send({ type: 'stop' }); throw e; }
     finally { this.capturing = false; }
   }
-  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.audio.remove('system'); this.emit({ localVideo: null, systemAudio: false }); }
+  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.emit({ localVideo: null, systemAudio: false }); }
   async stop() { this.stopLocal(); await this.syncTracks(); if (this.state.connected) await this.request({ type: 'stop' }); }
   async microphone() {
     if (this.micBusy) return; this.micBusy = true;
     try {
       if (this.micStream) { await this.stopMic(); return; }
-      this.audio.ensure();
       const room = this.state.room?.id, self = this.selfId;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 2 }, echoCancellation: true }, video: false });
       if (!room || this.state.room?.id !== room || this.selfId !== self || !this.state.connected) { stream.getTracks().forEach(t=>t.stop()); return; }
       this.micStream = stream; stream.getAudioTracks()[0].onended = () => this.stopMic().catch(e=>this.emit({error:e.message}));
       this.emit({ mic: true });
-      try { await this.syncTracks(); this.send({ type:'mic', enabled:true }); }
+      try { await this.syncTracks(); if(this.micStream===stream) this.send({ type:'mic', enabled:true }); }
       catch (e) { await this.stopMic().catch(()=>{}); throw e; }
     } finally { this.micBusy = false; }
   }
-  clearMic() { this.micStream?.getTracks().forEach(t=>{t.onended=null;t.stop();}); this.micStream=null; this.audio.remove('mic'); this.emit({mic:false}); }
+  clearMic() { this.micStream?.getTracks().forEach(t=>{t.onended=null;t.stop();}); this.micStream=null; this.emit({mic:false}); }
   async stopMic() { this.clearMic(); if (this.state.connected) this.send({type:'mic',enabled:false}); await this.syncTracks(); }
-  cleanup() { this.stopLocal(); this.clearMic(); this.audio.clear(); this.closePeer(); }
+  cleanup() { this.stopLocal(); this.clearMic(); this.closePeer(); }
   leave() { if (this.state.connected) this.send({ type: 'leave' }); sessionStorage.removeItem('friends-session'); this.cleanup(); this.latencyPending.clear(); this.emit({ room: null, messages: [], latestChat: null, latency:{} }); }
-  destroy() { this.closed = true; clearInterval(this.statsTimer); clearInterval(this.pingTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.audio.close(); this.ws?.close(); }
+  destroy() { this.closed = true; clearInterval(this.statsTimer); clearInterval(this.pingTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.ws?.close(); }
 }

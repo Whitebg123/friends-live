@@ -5,10 +5,11 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
 import { createApp } from '../server/index.js';
 test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickname login', { timeout: 90000 }, async t => {
-  const app = createApp({ production: false }); app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); t.after(() => app.close());
+  const app = createApp({ production: false }); let browser;
+  app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); t.after(async () => { await browser?.close(); await app.close(); });
   const url = `http://127.0.0.1:${app.server.address().port}`;
   const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-  const browser = await chromium.launch({ headless: true, ...(existsSync(edge) ? { executablePath: edge } : {}), args: ['--autoplay-policy=no-user-gesture-required'] }); t.after(() => browser.close());
+  browser = await chromium.launch({ headless: true, ...(existsSync(edge) ? { executablePath: edge } : {}), args: ['--autoplay-policy=no-user-gesture-required'] });
   const errors = []; const pages = [];
   for (const name of ['A', 'B', 'C', 'D']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -26,6 +27,9 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
     await p.getByLabel('昵称', { exact: true }).fill(name); await p.getByRole('button', { name: '进入', exact: true }).click(); await p.getByRole('button', { name: '开始投屏' }).waitFor(); assert.equal(await p.getByLabel('投屏目标帧率').count(), 0); assert.equal(await p.getByLabel('视频码率上限').count(),0);
   }
   const [a, b] = pages;
+  assert.equal(await a.locator('.screen-card[data-member="A"] input[type=range]').count(),0);
+  assert.equal(await a.locator('.screen-card[data-member="B"] input[type=range]').count(),2);
+  await a.getByRole('button',{name:'画质：最高',exact:true}).waitFor();
   await a.getByRole('button', { name: '开始投屏' }).click(); await b.getByRole('button', { name: '开始投屏' }).click(); assert.equal(await a.evaluate(()=>'frameRate' in window.__captureConstraints.video),false);
   await pages[2].waitForFunction(()=>[...document.querySelectorAll('.member-ping')].length===2 && [...document.querySelectorAll('.member-ping')].every(e=>/经服务器约 \d+ ms/.test(e.textContent)));
   assert.equal(await a.locator('.screen-card[data-member="A"] .member-ping').count(),0);
@@ -83,33 +87,28 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await a.getByRole('button', { name: '退出', exact: true }).click(); await b.getByText('3 人在线').waitFor();
   await b.setViewportSize({ width: 390, height: 844 }); assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await b.setViewportSize({ width: 1440, height: 900 });
-  await b.getByLabel('发送系统音量', { exact: true }).fill('35');
-  await b.getByLabel('发送麦克风音量', { exact: true }).fill('65');
+  await b.getByRole('button',{name:'画质：最高',exact:true}).click();
+  await b.getByRole('button',{name:'高帧率',exact:true}).click();
   await b.getByLabel('接收音量', { exact: true }).fill('45');
   const imageData = await b.evaluate(() => { const c = document.createElement('canvas'); c.width = c.height = 8; const ctx = c.getContext('2d'); ctx.fillStyle = '#777'; ctx.fillRect(0,0,8,8); return c.toDataURL('image/png').split(',')[1]; });
   await b.getByLabel('背景图片').setInputFiles({ name: 'background.png', mimeType: 'image/png', buffer: Buffer.from(imageData,'base64') });
   await b.getByRole('button', { name: '恢复黑色背景' }).waitFor();
   await b.reload(); await b.getByRole('button', { name: '开始投屏' }).waitFor();
-  assert.equal(await b.getByLabel('发送系统音量', { exact: true }).inputValue(), '35');
-  assert.equal(await b.getByLabel('发送麦克风音量', { exact: true }).inputValue(), '65');
+  await b.getByRole('button',{name:'画质：高帧率',exact:true}).waitFor();
   assert.equal(await b.getByLabel('接收音量', { exact: true }).inputValue(), '45');
   assert.match(await b.locator('.app').evaluate(e => getComputedStyle(e).backgroundImage), /data:image/);
   await b.getByRole('button', { name: '开始投屏' }).click();
   assert.equal(await b.evaluate(() => 'frameRate' in window.__captureConstraints.video), false);
+  assert.equal(await b.evaluate(() => window.__captureConstraints.video.height.ideal),720);
   await b.waitForFunction(() => [...document.querySelectorAll('audio')].length > 0 && [...document.querySelectorAll('audio')].every(a => Math.abs(a.volume - .45) < .001));
-  await b.waitForFunction(async () => { const peers=window.__pcs.filter(p=>p.connectionState==='connected'); return peers.length === 2 && peers.every(p=>p.getSenders().filter(s=>s.track?.kind==='video').every(s=>s.getParameters().encodings.every(e=>e.maxFramerate == null && e.maxBitrate === 40000000))); });
+  await b.waitForFunction(() => { const peers=window.__pcs.filter(p=>p.connectionState==='connected'); return peers.length===2 && peers.every(p=>{const cfg=p.getSenders().find(s=>s.track?.kind==='video')?.getParameters();return cfg?.degradationPreference==='maintain-framerate' && cfg.encodings[0]?.maxBitrate===20000000 && cfg.encodings[0]?.maxFramerate==null;}); });
+  await b.getByRole('button',{name:'画质：高帧率',exact:true}).click();await b.getByRole('button',{name:'最高',exact:true}).click();
+  await b.waitForFunction(()=>window.__pcs.filter(p=>p.connectionState==='connected').some(p=>p.getSenders().find(s=>s.track?.kind==='video')?.getParameters().encodings[0]?.maxBitrate===40000000));
   const listener=pages[2]; await b.getByRole('button',{name:'开启麦克风',exact:true}).click();
   await listener.locator('.screen-card[data-member="B"]').getByText('正在投屏 · 麦克风开').waitFor();
   await listener.getByLabel('B 系统声音接收音量',{exact:true}).fill('0');
   await listener.getByLabel('B 麦克风接收音量',{exact:true}).fill('60');
   await listener.waitForFunction(()=>{ const card=document.querySelector('.screen-card[data-member="B"]'); return card.querySelector('audio[data-channel="system"]')?.volume===0 && card.querySelector('audio[data-channel="mic"]')?.volume===.6 && document.querySelector('.screen-card[data-member="D"] audio[data-channel="mic"]')?.volume===1; });
-  async function outgoingRms(index) { return b.evaluate(async i => { const pc=window.__pcs.findLast(p=>p.connectionState==='connected'); const track=pc.getTransceivers()[i].sender.track; const ac=new AudioContext(); await ac.resume(); const source=ac.createMediaStreamSource(new MediaStream([track])), analyser=ac.createAnalyser(); source.connect(analyser); await new Promise(r=>setTimeout(r,200)); const data=new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(data); const rms=Math.sqrt(data.reduce((s,x)=>s+x*x,0)/data.length); source.disconnect(); await ac.close(); return rms; },index); }
-  assert.ok(await outgoingRms(1) > .01); assert.ok(await outgoingRms(2) > .01);
-  await b.getByLabel('发送系统音量', { exact: true }).fill('0');
-  assert.ok(await outgoingRms(1) < .001, 'system gain must mute its actual samples'); assert.ok(await outgoingRms(2) > .01, 'microphone must remain audible');
-  await b.getByLabel('发送系统音量', { exact: true }).fill('35');
-  await b.getByLabel('发送麦克风音量', { exact: true }).fill('0');
-  assert.ok(await outgoingRms(2) < .001, 'mic gain must mute its actual samples'); assert.ok(await outgoingRms(1) > .01, 'system audio must remain audible');
   await b.getByRole('button',{name:'停止投屏',exact:true}).click();
   await listener.locator('.screen-card[data-member="B"]').getByText('未投屏 · 麦克风开').waitFor();
   await b.getByRole('button',{name:'关闭麦克风',exact:true}).click();
@@ -117,6 +116,6 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await b.getByRole('button', { name: '恢复黑色背景' }).click();
   await b.reload(); await b.getByRole('button', { name: '开始投屏' }).waitFor();
   assert.equal(await b.locator('.app').evaluate(e=>getComputedStyle(e).backgroundImage), 'none');
-  t.diagnostic('Relay-path latency, no old danmaku in PiP, fifth member and third sharer admitted; independent outgoing audio samples; per-member/per-channel receive levels; mic remains on while stopping a screen share; saved settings survive reload.');
+  t.diagnostic('Full-screen chat; relay-path latency; no old PiP danmaku; fifth member and third sharer admitted; quality profile applies live and survives reload; independent receive levels and mic state.');
   assert.deepEqual(errors, []);
 });
