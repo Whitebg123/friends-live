@@ -1,5 +1,6 @@
 export class Peer {
-  constructor(live, id, epoch) { this.live = live; this.id = id; this.epoch = epoch; this.state = { remoteAudio: {} }; this.candidates = []; this.earlyIce = new Map(); this.previous = {}; }
+  constructor(live, id) { this.live = live; this.id = id; this.bitrate = live.bitrate; this.state = { remoteAudio: {} }; this.candidates = []; this.earlyIce = new Map(); this.previous = {}; }
+  get epoch() { return this.live.epoch; }
   target() { return this.live.state.room?.members.some(m => m.id === this.id && m.online) ? this.id : null; }
   emit(patch) { if (this.disposed) return; Object.assign(this.state, patch); this.live.emit({ remotePeers: { ...this.live.state.remotePeers, [this.id]: { ...this.state } } }); }
   relay(signal) { if (!this.disposed && this.target()) this.live.send({ type: 'signal', target: this.id, epoch: this.epoch, signal: { negotiation: this.negotiation, ...signal } }); }
@@ -30,18 +31,11 @@ export class Peer {
   async syncTracks(pc = this.pc) {
     if (!pc || pc.connectionState === 'closed') return;
     const display = this.live.displayApproved ? this.live.display : null;
-    const tracks = [display?.getVideoTracks()[0], display ? this.live.systemTrack() : null, this.live.micStream?.getAudioTracks()[0]];
+    const tracks = [display?.getVideoTracks()[0], this.live.audio.track('system', display?.getAudioTracks()[0]), this.live.audio.track('mic', this.live.micStream?.getAudioTracks()[0])];
     const ts = pc.getTransceivers();
-    try { await ts[0]?.sender.replaceTrack(tracks[0] || null); }
+    try { for (let i = 0; i < 3; i++) if (ts[i]) await ts[i].sender.replaceTrack(tracks[i] || null); }
     catch (e) { if (pc !== this.pc || pc.connectionState === 'closed') { if (this.pc && this.pc !== pc) await this.syncTracks(this.pc); return; } throw e; }
-    const audioResults = await Promise.allSettled(ts.slice(1, 3).map(async (transceiver, index) => {
-      await transceiver.sender.replaceTrack(tracks[index + 1] || null);
-    }));
-    if (pc !== this.pc || pc.connectionState === 'closed') return;
-    if (audioResults.some(result => result.status === 'rejected')) {
-      this.live.emit({ notice: '部分声音无法发送。' });
-    }
-    await this.setVideoQuality();
+    await this.setBitrate(this.bitrate);
   }
   async offer() {
     if (this.disposed || !this.target()) return;
@@ -65,22 +59,16 @@ export class Peer {
       for (const t of pc.getTransceivers()) t.direction = 'sendrecv';
       await this.syncTracks(pc); for (const c of early) await pc.addIceCandidate(c);
       await pc.setLocalDescription(await pc.createAnswer());
-      if (pc === this.pc) { this.relay({ kind: 'answer', sdp: pc.localDescription.sdp }); await this.setVideoQuality(); }
+      if (pc === this.pc) { this.relay({ kind: 'answer', sdp: pc.localDescription.sdp }); await this.setBitrate(this.bitrate); }
     } else if (s.negotiation === this.negotiation && this.pc) {
       const pc = this.pc;
-      if (s.kind === 'answer') { await pc.setRemoteDescription({ type: 'answer', sdp: s.sdp }); for (const c of this.candidates.splice(0)) await pc.addIceCandidate(c); await this.setVideoQuality(); }
+      if (s.kind === 'answer') { await pc.setRemoteDescription({ type: 'answer', sdp: s.sdp }); for (const c of this.candidates.splice(0)) await pc.addIceCandidate(c); await this.setBitrate(this.bitrate); }
       else if (s.kind === 'ice') { if (pc.remoteDescription) await pc.addIceCandidate(s.candidate); else this.candidates.push(s.candidate); }
     }
   }
-  async setVideoQuality() {
-    const sender = this.pc?.getSenders().find(s => s.track?.kind === 'video'); if (!sender || !this.pc.currentLocalDescription || !this.pc.currentRemoteDescription || this.pc.signalingState !== 'stable') return;
-    try {
-      const p = sender.getParameters(); if (!p.encodings?.length) return;
-      const {width,height,maxBitrate,priority}=this.live.quality, actual=sender.track.getSettings();
-      p.encodings[0].maxBitrate=maxBitrate;
-      p.encodings[0].scaleResolutionDownBy=Math.max(1,(actual.width||width)/width,(actual.height||height)/height);
-      delete p.encodings[0].maxFramerate; p.degradationPreference=priority; await sender.setParameters(p);
-    } catch { this.live.emit({ notice: '发送参数未被浏览器接受，使用浏览器自适应设置' }); }
+  async setBitrate(value) {
+    this.bitrate = Number(value); const sender = this.pc?.getSenders().find(s => s.track?.kind === 'video'); if (!sender || !this.pc.currentLocalDescription || !this.pc.currentRemoteDescription || this.pc.signalingState !== 'stable') return;
+    try { const p = sender.getParameters(); if (!p.encodings?.length) return; p.encodings[0].maxBitrate = this.bitrate * 1000000; if (this.live.fps === null) delete p.encodings[0].maxFramerate; else p.encodings[0].maxFramerate = this.live.fps; p.degradationPreference = 'maintain-resolution'; await sender.setParameters(p); } catch { this.live.emit({ notice: '发送参数未被浏览器接受，使用浏览器自适应设置' }); }
   }
   async stats() {
     const pc = this.pc; if (!pc) return; const report = await pc.getStats(); if (pc !== this.pc) return;
