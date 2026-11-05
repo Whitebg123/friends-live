@@ -30,7 +30,7 @@ export class Peer {
   async syncTracks(pc = this.pc) {
     if (!pc || pc.connectionState === 'closed') return;
     const display = this.live.displayApproved ? this.live.display : null;
-    const tracks = [display?.getVideoTracks()[0], display?.getAudioTracks()[0], this.live.micStream?.getAudioTracks()[0]];
+    const tracks = [display?.getVideoTracks()[0], display ? this.live.systemTrack() : null, this.live.micStream?.getAudioTracks()[0]];
     const ts = pc.getTransceivers();
     try { for (let i = 0; i < 3; i++) if (ts[i]) await ts[i].sender.replaceTrack(tracks[i] || null); }
     catch (e) { if (pc !== this.pc || pc.connectionState === 'closed') { if (this.pc && this.pc !== pc) await this.syncTracks(this.pc); return; } throw e; }

@@ -30,7 +30,7 @@ export class Live {
         this.emit({ selfId: d.selfId, messages: d.messages, error: '' }); this.setRoom(d.room);
         this.measureLatency();
         this.loadEmojis().catch(e => this.emit({ emojiError:e.message }));
-        if (this.display) this.request({ type: 'start', systemAudio: this.display.getAudioTracks().length > 0 }).catch(e => this.emit({ error: e.message }));
+        if (this.display) this.request({ type: 'start', systemAudio: !!this.systemTrack() }).catch(e => this.emit({ error: e.message }));
         if (this.micStream) this.send({ type: 'mic', enabled: true });
       } else if (d.type === 'room') this.setRoom(d.room);
       else if (d.type === 'latency-probe') this.send({type:'latency-reply',target:d.from,requestId:d.requestId});
@@ -116,18 +116,41 @@ export class Live {
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) throw Error('请使用桌面 Chrome / Edge，通过 HTTPS 或 localhost 打开');
       const video = captureConstraints(this.quality);
+      const supported = navigator.mediaDevices.getSupportedConstraints?.();
+      const audio = { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}) };
       let stream;
-      try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include' }); }
-      catch (e) { if (!['NotReadableError', 'OverconstrainedError'].includes(e.name)) throw e; stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false }); }
+      try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio, systemAudio: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' }); }
+      catch (e) { if (!['NotReadableError', 'OverconstrainedError'].includes(e.name)) throw e; stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false, selfBrowserSurface: 'exclude' }); }
       if (!this.state.room || !this.state.connected) { stream.getTracks().forEach(t => t.stop()); throw Error('请连接后再投屏'); }
       this.displayApproved = false; this.display = stream; stream.getVideoTracks()[0].contentHint = 'motion'; stream.getVideoTracks()[0].onended = () => this.stop().catch(e => this.emit({ error: e.message }));
-      this.emit({ localVideo: new MediaStream(stream.getVideoTracks()), systemAudio: stream.getAudioTracks().length > 0 });
-      await this.request({ type: 'start', systemAudio: stream.getAudioTracks().length > 0 }); this.displayApproved = true; await this.syncTracks();
-      if (!stream.getAudioTracks().length) this.emit({ notice: '未捕获系统音频。请检查浏览器分享对话框中的音频选项。' });
+      const system = this.systemTrack();
+      this.protectPlayback(!!system && system.getSettings().restrictOwnAudio !== true);
+      if (system) system.onended = () => { if (this.display === stream) this.stopSystemAudio().catch(e=>this.emit({error:e.message})); };
+      this.emit({ localVideo: new MediaStream(stream.getVideoTracks()), systemAudio: !!system });
+      await this.request({ type: 'start', systemAudio: !!system });
+      if (this.display !== stream) return;
+      this.displayApproved = true; await this.syncTracks();
+      if (system && !this.systemTrack()) await this.stopSystemAudio();
+      if (!system) this.emit({ notice: '未捕获系统音频。请检查浏览器分享对话框中的音频选项。' });
     } catch (e) { this.stopLocal(); await this.syncTracks().catch(() => {}); if (this.state.connected) this.send({ type: 'stop' }); throw e; }
     finally { this.capturing = false; }
   }
-  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.emit({ localVideo: null, systemAudio: false }); }
+  systemTrack() { return this.display?.getAudioTracks().find(t=>t.readyState==='live'); }
+  protectPlayback(active) {
+    // Mute already playing elements before the capture can reach any peer.
+    // React keeps newly mounted remote audio elements in the same state.
+    for (const el of document.querySelectorAll('audio[data-channel]')) el.muted=active;
+    this.emit({ playbackProtected:active });
+  }
+  async stopSystemAudio() {
+    const display = this.display; if (!display) return;
+    for (const track of display.getAudioTracks()) { track.onended=null; track.stop(); display.removeTrack(track); }
+    this.protectPlayback(false); this.emit({ systemAudio:false });
+    await this.syncTracks();
+    if (this.display===display && this.displayApproved && this.state.connected) await this.request({type:'start',systemAudio:false});
+  }
+  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.protectPlayback(false); this.emit({ localVideo: null, systemAudio: false }); }
   async stop() { this.stopLocal(); await this.syncTracks(); if (this.state.connected) await this.request({ type: 'stop' }); }
   async microphone() {
     if (this.micBusy) return; this.micBusy = true;

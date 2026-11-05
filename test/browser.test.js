@@ -19,7 +19,9 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
       const Native = RTCPeerConnection; window.__pcs = []; window.RTCPeerConnection = class extends Native { constructor(...args) { super(...args); window.__pcs.push(this); } };
       const sound = () => { const c = new AudioContext(); c.resume(); const o = c.createOscillator(), dst = c.createMediaStreamDestination(); o.connect(dst); o.start(); return dst.stream.getAudioTracks()[0]; };
       navigator.mediaDevices.getUserMedia = async () => new MediaStream([sound()]);
-      navigator.mediaDevices.getDisplayMedia = async (constraints) => { window.__captureConstraints = constraints; const c = document.createElement('canvas'); c.width = 640; c.height = 360; const ctx = c.getContext('2d'); let i = 0; setInterval(() => { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, 1920, 1080); ctx.fillStyle = '#ddd'; ctx.font = '60px sans-serif'; ctx.fillText(`Test screen ${++i}`, 30, 180); }, 16); const s = c.captureStream(20); s.addTrack(sound()); return s; };
+      const supported=navigator.mediaDevices.getSupportedConstraints.bind(navigator.mediaDevices);
+      navigator.mediaDevices.getSupportedConstraints=()=>({...supported(),restrictOwnAudio:true});
+      navigator.mediaDevices.getDisplayMedia = async (constraints) => { window.__captureConstraints = constraints; const c = document.createElement('canvas'); c.width = 640; c.height = 360; const ctx = c.getContext('2d'); let i = 0; setInterval(() => { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, 1920, 1080); ctx.fillStyle = '#ddd'; ctx.font = '60px sans-serif'; ctx.fillText(`Test screen ${++i}`, 30, 180); }, 16); const s = c.captureStream(20); if(constraints.audio) { const track=sound(), settings=track.getSettings.bind(track); if(window.__ownAudioIsolated) track.getSettings=()=>({...settings(),restrictOwnAudio:true}); s.addTrack(track); } return s; };
     });
     const p = await context.newPage(); p.on('pageerror', e => errors.push(e.message)); await p.goto(url); pages.push(p);
     assert.equal(await p.locator('input[type=password]').count(), 0);
@@ -31,6 +33,7 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   assert.equal(await a.locator('.screen-card[data-member="B"] input[type=range]').count(),2);
   await a.getByRole('button',{name:'画质：最高',exact:true}).waitFor();
   await a.getByRole('button', { name: '开始投屏' }).click(); await b.getByRole('button', { name: '开始投屏' }).click(); assert.equal(await a.evaluate(()=>'frameRate' in window.__captureConstraints.video),false);
+  assert.deepEqual(await a.evaluate(()=>({own:window.__captureConstraints.audio.restrictOwnAudio,self:window.__captureConstraints.selfBrowserSurface})),{own:true,self:'exclude'});
   await pages[2].waitForFunction(()=>[...document.querySelectorAll('.member-ping')].length===2 && [...document.querySelectorAll('.member-ping')].every(e=>/经服务器约 \d+ ms/.test(e.textContent)));
   assert.equal(await a.locator('.screen-card[data-member="A"] .member-ping').count(),0);
   for (const p of pages) {
@@ -39,6 +42,9 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
     await p.getByRole('button', { name: '开启麦克风' }).click();
   }
   for (const p of pages) await p.waitForFunction(async () => { const reports = await Promise.all(window.__pcs.filter(p => p.connectionState === 'connected').map(p => p.getStats())); return reports.flatMap(s => [...s.values()]).filter(s => s.type === 'inbound-rtp' && s.kind === 'audio' && s.bytesReceived > 0).length >= 3; });
+  for(const p of [a,b]) await p.waitForFunction(()=>{const audio=[...document.querySelectorAll('audio[data-channel]')];return audio.length>0&&audio.every(el=>el.muted);});
+  assert.equal(await pages[2].locator('audio[data-channel]').first().evaluate(el=>el.muted),false);
+  assert.equal(await a.locator('.screen-card[data-member="A"] video').evaluate(video=>video.muted&&video.srcObject.getAudioTracks().length===0),true);
   await a.getByLabel('聊天消息').fill('测试弹幕 hello'); await a.getByRole('button', { name: '发送', exact: true }).click();
   for (const p of pages) await p.locator('.messages').getByText('测试弹幕 hello').waitFor(); await b.locator('.bullet').first().waitFor();
   await b.getByRole('button', { name: '关闭弹幕' }).click(); assert.equal(await b.locator('.bullet').count(), 0);
@@ -59,6 +65,7 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
     await a.locator('.screen-card[data-member="B"]').getByRole('button',{name:'直播小窗',exact:true}).click();
     await a.waitForFunction(()=>{const video=documentPictureInPicture.window?.document.querySelector('.pip-live video');return video?.videoWidth>0 && video.currentTime>0;});
     assert.match(await a.evaluate(()=>documentPictureInPicture.window.document.querySelector('.pip-live-name').textContent),/^B/);
+    assert.equal(await a.evaluate(()=>{const v=documentPictureInPicture.window.document.querySelector('.pip-live video');return v.muted&&v.srcObject.getAudioTracks().length===0;}),true);
     assert.equal(await a.evaluate(()=>documentPictureInPicture.window.document.querySelectorAll('.pip-live .bullet').length),0);
     await b.getByLabel('聊天消息').fill('只显示新弹幕');await b.getByRole('button',{name:'发送',exact:true}).click();
     await a.waitForFunction(()=>[...documentPictureInPicture.window.document.querySelectorAll('.pip-live .bullet')].some(e=>e.textContent.includes('只显示新弹幕')));
@@ -71,6 +78,11 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await pages[2].getByRole('button',{name:'开始投屏',exact:true}).click();
   await b.waitForFunction(()=>document.querySelectorAll('video').length===3 && [...document.querySelectorAll('video')].every(v=>v.videoWidth>0));
   await pages[2].getByRole('button',{name:'停止投屏',exact:true}).click();
+  await pages[2].waitForFunction(()=>[...document.querySelectorAll('audio[data-channel]')].every(el=>!el.muted));
+  await a.getByRole('button',{name:'只分享画面并恢复收听',exact:true}).click();
+  await b.locator('.screen-card[data-member="A"]').getByText('无系统音频',{exact:true}).waitFor();
+  await a.waitForFunction(()=>[...document.querySelectorAll('audio[data-channel]')].every(el=>!el.muted)&&window.__pcs.filter(p=>p.connectionState==='connected').every(p=>p.getTransceivers()[1].sender.track===null));
+  await a.getByRole('button',{name:'停止投屏',exact:true}).waitFor();
   await a.getByRole('button', { name: '停止投屏' }).click();
   await b.waitForFunction(() => document.querySelectorAll('video').length === 1);
   assert.equal(await b.getByRole('button', { name: '停止投屏' }).count(), 1);
@@ -78,7 +90,11 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await b.reload(); await b.getByRole('button', { name: '开始投屏' }).waitFor();
   try { await b.waitForFunction(() => document.querySelector('video')?.videoWidth > 0); }
   catch (e) { t.diagnostic(JSON.stringify(await a.evaluate(() => ({ text: document.body.innerText, peers: window.__pcs.map(p => ({ connection: p.connectionState, signaling: p.signalingState, senders: p.getSenders().map(s => s.track?.readyState) })) })))); throw e; }
-  await b.getByRole('button', { name: '重连', exact: true }).click(); await b.waitForFunction(() => document.querySelector('video')?.videoWidth > 0);
+  await b.waitForFunction(()=>window.__pcs.filter(p=>p.connectionState==='connected').length===3);
+  await b.evaluate(()=>{window.__beforeRetry=window.__pcs.filter(p=>p.connectionState==='connected');});
+  await b.getByRole('button', { name: '重连', exact: true }).click();
+  await b.waitForFunction(()=>window.__beforeRetry.every(p=>p.connectionState==='closed')&&window.__pcs.filter(p=>p.connectionState==='connected').length===3&&document.querySelector('video')?.videoWidth>0);
+  await a.waitForFunction(()=>window.__pcs.filter(p=>p.connectionState==='connected').length===3);
   await a.evaluate(()=>{window.__beforeJoin=window.__pcs.filter(p=>p.connectionState==='connected');});
   const fifth=await browser.newPage();await fifth.goto(url);await fifth.getByLabel('昵称',{exact:true}).fill('E');await fifth.getByRole('button',{name:'进入',exact:true}).click();await fifth.getByText('5 人在线',{exact:true}).waitFor();
   await fifth.waitForFunction(()=>document.querySelector('video')?.videoWidth>0);
@@ -97,10 +113,13 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await b.getByRole('button',{name:'画质：高帧率',exact:true}).waitFor();
   assert.equal(await b.getByLabel('接收音量', { exact: true }).inputValue(), '45');
   assert.match(await b.locator('.app').evaluate(e => getComputedStyle(e).backgroundImage), /data:image/);
+  await b.evaluate(()=>{window.__ownAudioIsolated=true;});
   await b.getByRole('button', { name: '开始投屏' }).click();
   assert.equal(await b.evaluate(() => 'frameRate' in window.__captureConstraints.video), false);
   assert.equal(await b.evaluate(() => window.__captureConstraints.video.height.ideal),720);
   await b.waitForFunction(() => [...document.querySelectorAll('audio')].length > 0 && [...document.querySelectorAll('audio')].every(a => Math.abs(a.volume - .45) < .001));
+  assert.equal(await b.locator('audio[data-channel]').first().evaluate(el=>el.muted),false);
+  assert.equal(await b.getByRole('button',{name:'只分享画面并恢复收听',exact:true}).count(),0);
   await b.waitForFunction(() => { const peers=window.__pcs.filter(p=>p.connectionState==='connected'); return peers.length===2 && peers.every(p=>{const cfg=p.getSenders().find(s=>s.track?.kind==='video')?.getParameters();return cfg?.degradationPreference==='maintain-framerate' && cfg.encodings[0]?.maxBitrate===20000000 && cfg.encodings[0]?.maxFramerate==null;}); });
   await b.getByRole('button',{name:'画质：高帧率',exact:true}).click();await b.getByRole('button',{name:'最高',exact:true}).click();
   await b.waitForFunction(()=>window.__pcs.filter(p=>p.connectionState==='connected').some(p=>p.getSenders().find(s=>s.track?.kind==='video')?.getParameters().encodings[0]?.maxBitrate===40000000));
@@ -116,6 +135,6 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   await b.getByRole('button', { name: '恢复黑色背景' }).click();
   await b.reload(); await b.getByRole('button', { name: '开始投屏' }).waitFor();
   assert.equal(await b.locator('.app').evaluate(e=>getComputedStyle(e).backgroundImage), 'none');
-  t.diagnostic('Full-screen chat; relay-path latency; no old PiP danmaku; fifth member and third sharer admitted; quality profile applies live and survives reload; independent receive levels and mic state.');
+  t.diagnostic('Muted video previews and PiP; no receive playback during unisolated system audio sharing; restoring playback does not stop video; browser-reported isolation keeps receive playback enabled.');
   assert.deepEqual(errors, []);
 });
