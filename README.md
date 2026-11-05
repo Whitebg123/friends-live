@@ -1,5 +1,32 @@
 # Friends Live · 四人在线 · 双路投屏
 
+## 聊天表情与云端共享表情库
+
+点击聊天标题旁的「表情」可插入普通 emoji，也可从共享图片库点击发送表情包。成员上传后，所有在线成员的表情库会实时更新；聊天、画面弹幕和弹幕画中画均可显示图片。支持 PNG / JPG / GIF / WebP（保留 GIF 动图），单张最大 2 MB，共享库最多 200 张，重复上传相同文件不会重复保存。表情库没有删除按钮，管理员可在存储控制台删除图片；已删除图片的旧聊天链接会失效。
+
+**永久云存储需要配置 Supabase Storage。本次没有创建 Supabase 项目，也没有配置实际存储账号；默认状态会明确提示未启用，并禁用上传。** 普通 emoji、文字聊天和投屏不受影响。测试使用模拟 Supabase API 验证端到端流程，尚未针对实际 Supabase 项目完成联网实测。
+
+Render 免费服务的本地文件会在重启或部署时丢失，因此图片不保存在它的本地磁盘或内存里。参考：[Render 免费服务限制](https://render.com/docs/free)、[Supabase Storage 上传](https://supabase.com/docs/guides/storage/uploads/standard-uploads)。
+
+### 启用云端表情库（管理员一次性配置）
+
+1. 在自己的 https://supabase.com/dashboard 创建或选择项目，进入 Storage 创建一个名为 `friends-live-emojis` 的 **Private bucket**。这个 bucket 专门用于本网站，不要共用已有私人文件 bucket。限制单文件 2 MB，允许 `image/png`、`image/jpeg`、`image/gif`、`image/webp`。
+2. 在项目设置中取得 Project URL 和服务端的 legacy `service_role` API key。不要使用 anon / publishable key，也不要把 service_role key 贴进聊天、前端代码或 GitHub。
+3. 在朋友 Render 账号的现有 friends-live 服务 → Environment 中新增：
+
+   ```text
+   SUPABASE_URL=https://你的项目标识.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=你自己的service_role密钥
+   EMOJI_BUCKET=friends-live-emojis
+   ```
+
+   前两项必填，第三项与默认同名时可以不填。直接在 Render 中粘贴密钥，不要加 `VITE_` 前缀，不需要公开 bucket 或给匿名用户开放写权限。
+4. 保存并重新部署，进入网站点击「表情」。上传一张小图片，让另一个成员确认共享库出现，并点击发送。
+
+图片由服务器验证文件签名后上传，上传和列表需要当前登录会话，每分钟每人最多上传 10 次、全站最多 20 次。云端密钥只在服务器使用。图片通过网站同源 URL 代理显示，不发送云端密钥到浏览器；**知道图片链接的人能查看该图片**。表情库是全站共享，属于独立存储数据，不随房间聊天历史清空，重启后重新从云端读取。
+
+Supabase 的配额、暂停机制和可用性以自己的套餐为准，本代码不包含付费开通或防休眠操作。可在 Supabase Storage 控制台管理、备份或删除上传内容。
+
 ## 已保存的个人设置
 
 网页自动记住当前浏览器上次选择的视频码率、目标帧率、发送音量、接收音量和自定义背景；刷新或重新打开网站后恢复。清除网站数据、换浏览器或使用新的无痕会话不会继承设置。

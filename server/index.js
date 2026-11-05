@@ -5,6 +5,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
+import { EmojiStore, emojiRoutes } from './emojis.js';
 
 const random = () => randomBytes(24).toString('base64url');
 const equal = (a, b) => typeof a === 'string' && typeof b === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -46,6 +47,8 @@ export function createApp(options = {}) {
   const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio })) });
   const broadcast = data => { for (const m of members.values()) send(m.ws, data); };
   const publish = () => broadcast({ type: 'room', room: publicRoom() });
+  const emojiStore = options.emojiStore || new EmojiStore();
+  emojiRoutes(app, { express, store:emojiStore, allow, memberForToken:token => [...members.values()].find(m => m.ws?.readyState === WebSocket.OPEN && equal(m.token,token)), changed:() => broadcast({type:'emojis-updated'}) });
   function remove(member) {
     clearTimeout(member.timer);
     if (member.ws) member.ws.member = null;
@@ -67,7 +70,7 @@ export function createApp(options = {}) {
   }
   wss.on('connection', (ws, req) => {
     ws.alive = true; ws.on('pong', () => { ws.alive = true; });
-    ws.on('message', (raw, binary) => {
+    ws.on('message', async (raw, binary) => {
       const fail = (code, message, requestId) => send(ws, { type: 'error', code, message, requestId });
       if (!allow(`message:${req.socket.remoteAddress}`, 1200)) { ws.close(4008, 'Rate limited'); return; }
       let data;
@@ -97,9 +100,12 @@ export function createApp(options = {}) {
           publish(); send(ws, { type: 'ack', requestId }); return;
         }
         if (type === 'chat') {
-          if (!valid(data.text, 300) || !data.text.trim()) throw Error('CHAT:消息需为 1–300 字');
+          const isEmoji = typeof data.emojiId === 'string';
+          if (!isEmoji && (!valid(data.text, 300) || !data.text.trim())) throw Error('CHAT:消息需为 1–300 字');
           if (!allow(`chat:${member.id}`, 8, 10000)) throw Error('RATE:消息发送太快，请稍后再发');
-          const message = { id: random(), senderId: member.id, name: member.name, text: data.text.trim(), time: Date.now() };
+          let emoji;
+          if (isEmoji) { if(!/^[a-f0-9]{64}\.(png|jpg|gif|webp)$/.test(data.emojiId))throw Error('CHAT:无效表情'); const items=await emojiStore.list(); emoji=items.find(x=>x.id===data.emojiId); if(!emoji)throw Error('CHAT:表情不存在'); if(ws.member!==member || member.ws!==ws) return; }
+          const message = { id: random(), senderId: member.id, name: member.name, text: isEmoji ? '[表情包]' : data.text.trim(), time: Date.now(), ...(emoji ? {emoji} : {}) };
           room.messages.push(message); room.messages = room.messages.slice(-100);
           broadcast({ type: 'chat', message });
           send(ws, { type: 'ack', requestId }); return;

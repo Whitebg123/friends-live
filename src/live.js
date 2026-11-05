@@ -28,8 +28,10 @@ export class Live {
       if (d.type === 'welcome') {
         sessionStorage.setItem('friends-session', d.token); this.selfId = d.selfId; this.iceServers = d.iceServers; this.epoch = null;
         this.emit({ selfId: d.selfId, messages: d.messages, error: '' }); this.setRoom(d.room);
+        this.loadEmojis().catch(e => this.emit({ emojiError:e.message }));
         if (this.display) this.request({ type: 'start', systemAudio: this.display.getAudioTracks().length > 0 }).catch(e => this.emit({ error: e.message }));
       } else if (d.type === 'room') this.setRoom(d.room);
+      else if (d.type === 'emojis-updated') this.loadEmojis().catch(e=>this.emit({emojiError:e.message}));
       else if (d.type === 'signal' && d.epoch === this.epoch) { const p = this.connection(d.from); p.queue = (p.queue || Promise.resolve()).then(() => p.signal(d)).catch(e => { if (!p.disposed) this.emit({ error: `媒体连接失败：${e.message}` }); }); }
       else if (d.type === 'chat') this.emit({ messages: [...this.state.messages, d.message].slice(-100), latestChat: d.message });
       else if (d.type === 'ack' || d.type === 'error') {
@@ -51,6 +53,13 @@ export class Live {
     ws.onerror = () => this.emit({ status: '等待服务器启动' });
   }
   login(name) { localStorage.setItem('friends-name', name); this.send({ type: 'login', name }); }
+  async emojiApi(options) { const r=await fetch('/api/emojis',{...options,headers:{Authorization:`Bearer ${sessionStorage.getItem('friends-session')}`,...options?.headers},signal:AbortSignal.timeout(30000)}); const data=await r.json(); if(!r.ok)throw Error(data.error||'表情库请求失败'); return data; }
+  async loadEmojis() { const data=await this.emojiApi(); this.emit({emojis:data.items,emojiConfigured:data.configured,emojiError:''}); }
+  async uploadEmoji(file) {
+    if(!file || !['image/png','image/jpeg','image/gif','image/webp'].includes(file.type) || file.size>2*1024*1024)throw Error('请选择 2 MB 以内的 PNG、JPG、GIF 或 WebP 表情');
+    const bitmap=await createImageBitmap(file); const valid=bitmap.width<=4096 && bitmap.height<=4096; bitmap.close(); if(!valid)throw Error('表情尺寸不能超过 4096×4096');
+    await this.emojiApi({method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file}); await this.loadEmojis();
+  }
   setRoom(room) {
     const changed = room.epoch !== this.epoch; this.emit({ room });
     if (changed) { this.epoch = room.epoch; this.closePeer();
