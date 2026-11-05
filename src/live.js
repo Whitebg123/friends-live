@@ -5,9 +5,10 @@ export class Live {
   constructor(update) {
     this.update = update; this.state = { room: null, status: '正在连接', messages: [], remotePeers: {}, stats: {} };
     this.preferences = loadPreferences(); this.bitrate = this.preferences.bitrate; this.fps = this.preferences.fps;
-    this.audio = new OutgoingAudio(this.preferences.sendVolume);
+    this.audio = new OutgoingAudio({ mic: this.preferences.micVolume, system: this.preferences.systemVolume });
     this.peers = new Map(); this.pending = new Map(); this.retry = 0; this.emit({ preferences: this.preferences, fps: this.fps }); this.open();
     this.statsTimer = setInterval(() => this.stats().catch(() => {}), 1500);
+    this.pingTimer = setInterval(() => this.measureServerPing(), 4000);
   }
   emit(patch) { Object.assign(this.state, patch); this.update({ ...this.state }); }
   send(data) { if (this.ws?.readyState !== WebSocket.OPEN) throw Error('连接尚未就绪'); this.ws.send(JSON.stringify(data)); }
@@ -28,8 +29,10 @@ export class Live {
       if (d.type === 'welcome') {
         sessionStorage.setItem('friends-session', d.token); this.selfId = d.selfId; this.iceServers = d.iceServers; this.epoch = null;
         this.emit({ selfId: d.selfId, messages: d.messages, error: '' }); this.setRoom(d.room);
+        this.measureServerPing();
         this.loadEmojis().catch(e => this.emit({ emojiError:e.message }));
         if (this.display) this.request({ type: 'start', systemAudio: this.display.getAudioTracks().length > 0 }).catch(e => this.emit({ error: e.message }));
+        if (this.micStream) this.send({ type: 'mic', enabled: true });
       } else if (d.type === 'room') this.setRoom(d.room);
       else if (d.type === 'emojis-updated') this.loadEmojis().catch(e=>this.emit({emojiError:e.message}));
       else if (d.type === 'signal' && d.epoch === this.epoch) { const p = this.connection(d.from); p.queue = (p.queue || Promise.resolve()).then(() => p.signal(d)).catch(e => { if (!p.disposed) this.emit({ error: `媒体连接失败：${e.message}` }); }); }
@@ -45,7 +48,7 @@ export class Live {
     };
     ws.onclose = e => {
       if (this.closed || ws !== this.ws) return;
-      this.closePeer(); this.emit({ connected: false, status: '正在重连' });
+      this.closePeer(); this.emit({ connected: false, status: '正在重连', serverPing:null });
       for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(Error('连接已断开')); } this.pending.clear();
       if (e.code === 4001) { this.closed = true; this.cleanup(); this.emit({ room: null, error: '此会话已在其他页面恢复，请刷新' }); return; }
       this.reconnectTimer = setTimeout(() => this.open(), Math.min(1000 * 2 ** this.retry++, 10000));
@@ -79,9 +82,23 @@ export class Live {
     if (track) { const constraints = track.getConstraints(); if (next === null) delete constraints.frameRate; else constraints.frameRate = { ideal: next, max: next }; await track.applyConstraints(constraints); }
     this.preference({ fps: next }); this.fps = next; this.emit({ fps: next }); await Promise.all([...this.peers.values()].map(p => p.setBitrate(this.bitrate)));
   }
-  setVolume(direction, value) { const level = Math.max(0, Math.min(1, Number(value))); this.preference({ [direction === 'send' ? 'sendVolume' : 'receiveVolume']: level }); if (direction === 'send') this.audio.setVolume(level); }
+  setVolume(channel, value, memberId) {
+    const level = Math.max(0, Math.min(1, Number(value)));
+    if (memberId) {
+      const previous = this.preferences.peerVolumes;
+      this.preference({ peerVolumes: Object.fromEntries([...Object.entries(previous).filter(([id]) => id !== memberId), [memberId, { mic: 1, system: 1, ...previous[memberId], [channel]: level }]].slice(-64)) });
+    } else if (channel === 'receive') this.preference({ receiveVolume: level });
+    else { this.preference({ [channel === 'mic' ? 'micVolume' : 'systemVolume']: level }); this.audio.setVolume(channel, level); }
+  }
   async retryMedia() { await Promise.all([...this.peers.values()].map(p => this.selfId < p.id ? p.offer() : Promise.resolve(p.relay({ kind: 'ready' })))); }
   async stats() { await Promise.all([...this.peers.values()].map(p => p.stats())); }
+  async measureServerPing() {
+    if (this.pinging || !this.state.room || !this.state.connected) return;
+    this.pinging=true; const start=performance.now(), socket=this.ws, id=this.selfId;
+    try { await this.request({type:'ping'}); if(this.ws===socket && this.selfId===id && this.state.room) this.emit({serverPing:performance.now()-start}); }
+    catch { if(this.ws===socket) this.emit({serverPing:null}); }
+    finally { this.pinging=false; }
+  }
   async share() {
     if (this.display || this.capturing) return;
     this.capturing = true;
@@ -104,14 +121,21 @@ export class Live {
   async stop() { this.stopLocal(); await this.syncTracks(); if (this.state.connected) await this.request({ type: 'stop' }); }
   async microphone() {
     if (this.micBusy) return; this.micBusy = true;
-    this.audio.ensure();
     try {
-      if (this.micStream) { this.micStream.getTracks().forEach(t => t.stop()); this.micStream = null; this.audio.remove('mic'); }
-      else this.micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 2 }, echoCancellation: true }, video: false });
-      this.emit({ mic: !!this.micStream }); await this.syncTracks();
+      if (this.micStream) { await this.stopMic(); return; }
+      this.audio.ensure();
+      const room = this.state.room?.id, self = this.selfId;
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 2 }, echoCancellation: true }, video: false });
+      if (!room || this.state.room?.id !== room || this.selfId !== self || !this.state.connected) { stream.getTracks().forEach(t=>t.stop()); return; }
+      this.micStream = stream; stream.getAudioTracks()[0].onended = () => this.stopMic().catch(e=>this.emit({error:e.message}));
+      this.emit({ mic: true });
+      try { await this.syncTracks(); this.send({ type:'mic', enabled:true }); }
+      catch (e) { await this.stopMic().catch(()=>{}); throw e; }
     } finally { this.micBusy = false; }
   }
-  cleanup() { this.stopLocal(); this.micStream?.getTracks().forEach(t => t.stop()); this.micStream = null; this.audio.clear(); this.closePeer(); this.emit({ mic: false }); }
-  leave() { if (this.state.connected) this.send({ type: 'leave' }); sessionStorage.removeItem('friends-session'); this.cleanup(); this.epoch = null; this.emit({ room: null, messages: [], latestChat: null }); }
-  destroy() { this.closed = true; clearInterval(this.statsTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.audio.close(); this.ws?.close(); }
+  clearMic() { this.micStream?.getTracks().forEach(t=>{t.onended=null;t.stop();}); this.micStream=null; this.audio.remove('mic'); this.emit({mic:false}); }
+  async stopMic() { this.clearMic(); if (this.state.connected) this.send({type:'mic',enabled:false}); await this.syncTracks(); }
+  cleanup() { this.stopLocal(); this.clearMic(); this.audio.clear(); this.closePeer(); }
+  leave() { if (this.state.connected) this.send({ type: 'leave' }); sessionStorage.removeItem('friends-session'); this.cleanup(); this.epoch = null; this.emit({ room: null, messages: [], latestChat: null, serverPing:null }); }
+  destroy() { this.closed = true; clearInterval(this.statsTimer); clearInterval(this.pingTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.audio.close(); this.ws?.close(); }
 }

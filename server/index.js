@@ -44,7 +44,7 @@ export function createApp(options = {}) {
     }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
-  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio })) });
+  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio, mic: !!m.mic })) });
   const broadcast = data => { for (const m of members.values()) send(m.ws, data); };
   const publish = () => broadcast({ type: 'room', room: publicRoom() });
   const emojiStore = options.emojiStore || new EmojiStore();
@@ -61,7 +61,7 @@ export function createApp(options = {}) {
   function attach(ws, member, isNew = false) {
     clearTimeout(member.timer);
     const old = member.ws;
-    if (old && old !== ws) { old.member = null; old.close(4001, 'Session resumed elsewhere'); member.sharing = false; member.systemAudio = false; }
+    if (old && old !== ws) { old.member = null; old.close(4001, 'Session resumed elsewhere'); member.sharing = false; member.systemAudio = false; member.mic = false; }
     member.ws = ws; ws.member = member;
     if (isNew) { members.set(member.id, member); if (!room.ownerId) room.ownerId = member.id; }
     room.epoch = random();
@@ -92,7 +92,13 @@ export function createApp(options = {}) {
         }
         const member = ws.member;
         if (!member) throw Error('AUTH:请先输入昵称进入');
+        if (type === 'ping') { send(ws, { type: 'ack', requestId }); return; }
         if (type === 'leave') { remove(member); send(ws, { type: 'left' }); return; }
+        if (type === 'mic') {
+          if (typeof data.enabled !== 'boolean' || (data.target != null && data.target !== member.id)) throw Error('FORBIDDEN:只能开关自己的麦克风');
+          if (member.mic !== data.enabled) { member.mic = data.enabled; publish(); }
+          return;
+        }
         if (type === 'start' || type === 'stop') {
           if (data.target != null && data.target !== member.id) throw Error('FORBIDDEN:只能控制自己的投屏');
           if (type === 'start' && !member.sharing && [...members.values()].filter(m => m.sharing).length >= maxSharers) throw Error('SHARE_FULL:已有两人在投屏，请等其中一人停止后再试');
@@ -131,7 +137,7 @@ export function createApp(options = {}) {
     ws.on('close', () => {
       const m = ws.member;
       if (!m || m.ws !== ws || shuttingDown) return;
-      m.ws = null; m.sharing = false; m.systemAudio = false; room.epoch = random(); publish();
+      m.ws = null; m.sharing = false; m.systemAudio = false; m.mic = false; room.epoch = random(); publish();
       m.timer = setTimeout(() => remove(m), grace);
     });
   });

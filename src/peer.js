@@ -1,5 +1,5 @@
 export class Peer {
-  constructor(live, id) { this.live = live; this.id = id; this.bitrate = live.bitrate; this.state = { remoteAudio: [] }; this.candidates = []; this.earlyIce = new Map(); this.previous = {}; }
+  constructor(live, id) { this.live = live; this.id = id; this.bitrate = live.bitrate; this.state = { remoteAudio: {} }; this.candidates = []; this.earlyIce = new Map(); this.previous = {}; }
   get epoch() { return this.live.epoch; }
   target() { return this.live.state.room?.members.some(m => m.id === this.id && m.online) ? this.id : null; }
   emit(patch) { if (this.disposed) return; Object.assign(this.state, patch); this.live.emit({ remotePeers: { ...this.live.state.remotePeers, [this.id]: { ...this.state } } }); }
@@ -8,12 +8,21 @@ export class Peer {
   closePeer() {
     if (this.pc) { this.pc.ontrack = null; this.pc.onicecandidate = null; this.pc.onconnectionstatechange = null; this.pc.close(); }
     this.pc = null; this.candidates = []; this.earlyIce = new Map(); this.negotiation = null; this.previous = {};
-    clearTimeout(this.iceTimer); this.emit({ remoteVideo: null, remoteAudio: [], stats: {}, mediaStatus: '等待连接' });
+    clearTimeout(this.iceTimer); this.emit({ remoteVideo: null, remoteAudio: {}, stats: {}, mediaStatus: '等待连接' });
   }
   peer() {
     const pc = this.pc = new RTCPeerConnection({ iceServers: this.live.iceServers });
     pc.onicecandidate = e => { if (e.candidate && pc === this.pc) try { this.relay({ kind: 'ice', candidate: e.candidate.toJSON() }); } catch {} };
-    pc.ontrack = e => { if (pc !== this.pc) return; const stream = new MediaStream([e.track]); this.emit(e.track.kind === 'video' ? { remoteVideo: stream } : { remoteAudio: [...this.state.remoteAudio, stream] }); };
+    pc.ontrack = e => {
+      if (pc !== this.pc) return;
+      const stream = new MediaStream([e.track]);
+      if (e.track.kind === 'video') this.emit({ remoteVideo: stream });
+      else {
+        // SDP keeps fixed transceiver slots: video, system audio, microphone.
+        const channel = ['video', 'system', 'mic'][pc.getTransceivers().indexOf(e.transceiver)];
+        if (channel === 'system' || channel === 'mic') this.emit({ remoteAudio: { ...this.state.remoteAudio, [channel]: stream } });
+      }
+    };
     pc.onconnectionstatechange = () => { if (pc !== this.pc) return; this.emit({ mediaStatus: pc.connectionState }); if (pc.connectionState === 'failed') this.failure(); };
     this.iceTimer = setTimeout(() => { if (pc === this.pc && pc.connectionState !== 'connected') this.failure(); }, 25000);
     return pc;
