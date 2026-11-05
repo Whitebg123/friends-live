@@ -1,8 +1,12 @@
 import { Peer } from './peer.js';
+import { loadPreferences, savePreferences } from './preferences.js';
+import { OutgoingAudio } from './audio.js';
 export class Live {
   constructor(update) {
     this.update = update; this.state = { room: null, status: '正在连接', messages: [], remotePeers: {}, stats: {} };
-    this.peers = new Map(); this.pending = new Map(); this.retry = 0; this.bitrate = 15; this.fps = 40; this.open();
+    this.preferences = loadPreferences(); this.bitrate = this.preferences.bitrate; this.fps = this.preferences.fps;
+    this.audio = new OutgoingAudio(this.preferences.sendVolume);
+    this.peers = new Map(); this.pending = new Map(); this.retry = 0; this.emit({ preferences: this.preferences, fps: this.fps }); this.open();
     this.statsTimer = setInterval(() => this.stats().catch(() => {}), 1500);
   }
   emit(patch) { Object.assign(this.state, patch); this.update({ ...this.state }); }
@@ -59,8 +63,14 @@ export class Live {
   closePeer() { for (const p of this.peers.values()) p.dispose(); this.peers.clear(); this.emit({ remotePeers: {} }); }
   async signal(data) { if (data.epoch !== this.epoch || !this.state.room?.members.some(m => m.id === data.from && m.online)) return; await this.connection(data.from).signal(data); }
   async syncTracks() { await Promise.all([...this.peers.values()].map(p => p.syncTracks())); }
-  async setBitrate(value) { this.bitrate = Number(value); await Promise.all([...this.peers.values()].map(p => p.setBitrate(value))); }
-  async setFrameRate(value) { this.fps = Number(value); this.emit({ fps: this.fps }); const track = this.display?.getVideoTracks()[0]; if (track) await track.applyConstraints({ frameRate: { ideal: this.fps, max: this.fps } }); await this.setBitrate(this.bitrate); }
+  preference(patch) { const next = { ...this.preferences, ...patch }; try { savePreferences(next); } catch { throw Error('浏览器无法保存设置，请检查存储权限或清理网站存储空间'); } this.preferences = next; this.emit({ preferences: next }); }
+  async setBitrate(value) { this.bitrate = Number(value); this.preference({ bitrate: this.bitrate }); await Promise.all([...this.peers.values()].map(p => p.setBitrate(value))); }
+  async setFrameRate(value) {
+    const next = value === 'unlimited' ? null : Number(value), track = this.display?.getVideoTracks()[0];
+    if (track) { const constraints = track.getConstraints(); if (next === null) delete constraints.frameRate; else constraints.frameRate = { ideal: next, max: next }; await track.applyConstraints(constraints); }
+    this.preference({ fps: next }); this.fps = next; this.emit({ fps: next }); await Promise.all([...this.peers.values()].map(p => p.setBitrate(this.bitrate)));
+  }
+  setVolume(direction, value) { const level = Math.max(0, Math.min(1, Number(value))); this.preference({ [direction === 'send' ? 'sendVolume' : 'receiveVolume']: level }); if (direction === 'send') this.audio.setVolume(level); }
   async retryMedia() { await Promise.all([...this.peers.values()].map(p => this.selfId < p.id ? p.offer() : Promise.resolve(p.relay({ kind: 'ready' })))); }
   async stats() { await Promise.all([...this.peers.values()].map(p => p.stats())); }
   async share() {
@@ -68,7 +78,8 @@ export class Live {
     this.capturing = true;
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) throw Error('请使用桌面 Chrome / Edge，通过 HTTPS 或 localhost 打开');
-      const video = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: this.fps, max: this.fps } };
+      this.audio.ensure();
+      const video = { width: { ideal: 1920 }, height: { ideal: 1080 }, ...(this.fps === null ? {} : { frameRate: { ideal: this.fps, max: this.fps } }) };
       let stream;
       try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false }, systemAudio: 'include' }); }
       catch (e) { if (!['NotReadableError', 'OverconstrainedError'].includes(e.name)) throw e; stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false }); }
@@ -80,17 +91,18 @@ export class Live {
     } catch (e) { this.stopLocal(); await this.syncTracks().catch(() => {}); if (this.state.connected) this.send({ type: 'stop' }); throw e; }
     finally { this.capturing = false; }
   }
-  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.emit({ localVideo: null, systemAudio: false }); }
+  stopLocal() { this.displayApproved = false; this.display?.getTracks().forEach(t => { t.onended = null; t.stop(); }); this.display = null; this.audio.remove('system'); this.emit({ localVideo: null, systemAudio: false }); }
   async stop() { this.stopLocal(); await this.syncTracks(); if (this.state.connected) await this.request({ type: 'stop' }); }
   async microphone() {
     if (this.micBusy) return; this.micBusy = true;
+    this.audio.ensure();
     try {
-      if (this.micStream) { this.micStream.getTracks().forEach(t => t.stop()); this.micStream = null; }
+      if (this.micStream) { this.micStream.getTracks().forEach(t => t.stop()); this.micStream = null; this.audio.remove('mic'); }
       else this.micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: { ideal: 2 }, echoCancellation: true }, video: false });
       this.emit({ mic: !!this.micStream }); await this.syncTracks();
     } finally { this.micBusy = false; }
   }
-  cleanup() { this.stopLocal(); this.micStream?.getTracks().forEach(t => t.stop()); this.micStream = null; this.closePeer(); this.emit({ mic: false }); }
+  cleanup() { this.stopLocal(); this.micStream?.getTracks().forEach(t => t.stop()); this.micStream = null; this.audio.clear(); this.closePeer(); this.emit({ mic: false }); }
   leave() { if (this.state.connected) this.send({ type: 'leave' }); sessionStorage.removeItem('friends-session'); this.cleanup(); this.epoch = null; this.emit({ room: null, messages: [], latestChat: null }); }
-  destroy() { this.closed = true; clearInterval(this.statsTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.ws?.close(); }
+  destroy() { this.closed = true; clearInterval(this.statsTimer); clearTimeout(this.reconnectTimer); this.cleanup(); this.audio.close(); this.ws?.close(); }
 }

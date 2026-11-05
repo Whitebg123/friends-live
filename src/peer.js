@@ -21,7 +21,8 @@ export class Peer {
   failure() { this.emit({ error: '媒体连接失败。请重连；若 NAT 或防火墙阻止直连，需要配置外部 TURN。' }); }
   async syncTracks(pc = this.pc) {
     if (!pc || pc.connectionState === 'closed') return;
-    const tracks = [(this.live.displayApproved ? this.live.display : null)?.getVideoTracks()[0], (this.live.displayApproved ? this.live.display : null)?.getAudioTracks()[0], this.live.micStream?.getAudioTracks()[0]];
+    const display = this.live.displayApproved ? this.live.display : null;
+    const tracks = [display?.getVideoTracks()[0], this.live.audio.track('system', display?.getAudioTracks()[0]), this.live.audio.track('mic', this.live.micStream?.getAudioTracks()[0])];
     const ts = pc.getTransceivers();
     try { for (let i = 0; i < 3; i++) if (ts[i]) await ts[i].sender.replaceTrack(tracks[i] || null); }
     catch (e) { if (pc !== this.pc || pc.connectionState === 'closed') { if (this.pc && this.pc !== pc) await this.syncTracks(this.pc); return; } throw e; }
@@ -58,7 +59,7 @@ export class Peer {
   }
   async setBitrate(value) {
     this.bitrate = Number(value); const sender = this.pc?.getSenders().find(s => s.track?.kind === 'video'); if (!sender || !this.pc.currentLocalDescription || !this.pc.currentRemoteDescription || this.pc.signalingState !== 'stable') return;
-    try { const p = sender.getParameters(); if (!p.encodings?.length) return; p.encodings[0].maxBitrate = this.bitrate * 1000000; p.encodings[0].maxFramerate = this.live.fps; p.degradationPreference = 'maintain-resolution'; await sender.setParameters(p); } catch { this.live.emit({ notice: '码率设置未被浏览器接受，使用浏览器自动参数' }); }
+    try { const p = sender.getParameters(); if (!p.encodings?.length) return; p.encodings[0].maxBitrate = this.bitrate * 1000000; if (this.live.fps === null) delete p.encodings[0].maxFramerate; else p.encodings[0].maxFramerate = this.live.fps; p.degradationPreference = 'maintain-resolution'; await sender.setParameters(p); } catch { this.live.emit({ notice: '发送参数未被浏览器接受，使用浏览器自适应设置' }); }
   }
   async stats() {
     const pc = this.pc; if (!pc) return; const report = await pc.getStats(); if (pc !== this.pc) return;
