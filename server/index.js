@@ -15,6 +15,7 @@ export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const origin = options.origin ?? process.env.PUBLIC_ORIGIN;
   const grace = options.grace ?? 30000;
+  const maxMembers = 4, maxSharers = 2;
   const members = new Map(), limits = new Map();
   const room = { id: random(), epoch: random(), ownerId: null, messages: [] };
   let shuttingDown = false;
@@ -42,7 +43,7 @@ export function createApp(options = {}) {
     }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
-  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers: 2, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio })) });
+  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio })) });
   const broadcast = data => { for (const m of members.values()) send(m.ws, data); };
   const publish = () => broadcast({ type: 'room', room: publicRoom() });
   function remove(member) {
@@ -83,7 +84,7 @@ export function createApp(options = {}) {
             attach(ws, m); return;
           }
           if (!valid(data.name, 32) || !data.name.trim() || /[\u0000-\u001f\u007f]/u.test(data.name)) throw Error('NAME:昵称需为 1–32 个可见字符');
-          if (members.size >= 2) throw Error('FULL:最多同时在线两人，断线席位保留 30 秒');
+          if (members.size >= maxMembers) throw Error('FULL:最多同时在线 4 人，断线席位保留 30 秒');
           attach(ws, { id: random(), token: random(), name: data.name.trim(), sharing: false, systemAudio: false }, true); return;
         }
         const member = ws.member;
@@ -91,6 +92,7 @@ export function createApp(options = {}) {
         if (type === 'leave') { remove(member); send(ws, { type: 'left' }); return; }
         if (type === 'start' || type === 'stop') {
           if (data.target != null && data.target !== member.id) throw Error('FORBIDDEN:只能控制自己的投屏');
+          if (type === 'start' && !member.sharing && [...members.values()].filter(m => m.sharing).length >= maxSharers) throw Error('SHARE_FULL:已有两人在投屏，请等其中一人停止后再试');
           member.sharing = type === 'start'; member.systemAudio = member.sharing && data.systemAudio === true;
           publish(); send(ws, { type: 'ack', requestId }); return;
         }
@@ -105,11 +107,11 @@ export function createApp(options = {}) {
         if (type === 'signal') {
           const target = members.get(data.target), s = data.signal;
           if (!target || target.id === member.id || target.ws?.readyState !== WebSocket.OPEN || data.epoch !== room.epoch || !s || typeof s !== 'object' || Array.isArray(s)) throw Error('SIGNAL:无效或过期的信令');
-          // One designated offerer negotiates sendrecv video + system audio + microphone.
-          // Both participants can replace their own tracks without renegotiation.
-          if (s.kind === 'ready') { if (member.id === room.ownerId) throw Error('SIGNAL:无效协商方向'); }
+          // Each pair has one deterministic offerer; all pairs negotiate independently.
+          const offerer = member.id < target.id;
+          if (s.kind === 'ready') { if (offerer) throw Error('SIGNAL:无效协商方向'); }
           else if (s.kind === 'offer' || s.kind === 'answer') {
-            if ((s.kind === 'offer') !== (member.id === room.ownerId) || !valid(s.sdp, 100000) || !valid(s.negotiation, 64)) throw Error('SIGNAL:无效的会话描述');
+            if ((s.kind === 'offer') !== offerer || !valid(s.sdp, 100000) || !valid(s.negotiation, 64)) throw Error('SIGNAL:无效的会话描述');
           } else if (s.kind === 'ice') {
             const c = s.candidate;
             if (!valid(s.negotiation, 64) || !c || typeof c !== 'object' || typeof c.candidate !== 'string' || c.candidate.length > 5000 || (c.sdpMid != null && typeof c.sdpMid !== 'string') || (c.sdpMLineIndex != null && !Number.isInteger(c.sdpMLineIndex))) throw Error('SIGNAL:无效 ICE 候选');
