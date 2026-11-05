@@ -16,7 +16,6 @@ export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const origin = options.origin ?? process.env.PUBLIC_ORIGIN;
   const grace = options.grace ?? 30000;
-  const maxMembers = 4, maxSharers = 2;
   const members = new Map(), limits = new Map();
   const room = { id: random(), epoch: random(), ownerId: null, messages: [] };
   let shuttingDown = false;
@@ -39,12 +38,12 @@ export function createApp(options = {}) {
   }
   server.on('upgrade', (req, socket, head) => {
     const expected = origin || `${production ? 'https' : 'http'}://${req.headers.host}`;
-    if (req.url !== '/ws' || req.headers.origin !== expected || !allow(`upgrade:${req.socket.remoteAddress}`, 60) || wss.clients.size >= 32) {
+    if (req.url !== '/ws' || req.headers.origin !== expected || !allow(`upgrade:${req.socket.remoteAddress}`, 60)) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
-  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio, mic: !!m.mic })) });
+  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio, mic: !!m.mic })) });
   const broadcast = data => { for (const m of members.values()) send(m.ws, data); };
   const publish = () => broadcast({ type: 'room', room: publicRoom() });
   const emojiStore = options.emojiStore || new EmojiStore();
@@ -87,7 +86,6 @@ export function createApp(options = {}) {
             attach(ws, m); return;
           }
           if (!valid(data.name, 32) || !data.name.trim() || /[\u0000-\u001f\u007f]/u.test(data.name)) throw Error('NAME:昵称需为 1–32 个可见字符');
-          if (members.size >= maxMembers) throw Error('FULL:最多同时在线 4 人，断线席位保留 30 秒');
           attach(ws, { id: random(), token: random(), name: data.name.trim(), sharing: false, systemAudio: false }, true); return;
         }
         const member = ws.member;
@@ -101,7 +99,6 @@ export function createApp(options = {}) {
         }
         if (type === 'start' || type === 'stop') {
           if (data.target != null && data.target !== member.id) throw Error('FORBIDDEN:只能控制自己的投屏');
-          if (type === 'start' && !member.sharing && [...members.values()].filter(m => m.sharing).length >= maxSharers) throw Error('SHARE_FULL:已有两人在投屏，请等其中一人停止后再试');
           member.sharing = type === 'start'; member.systemAudio = member.sharing && data.systemAudio === true;
           publish(); send(ws, { type: 'ack', requestId }); return;
         }

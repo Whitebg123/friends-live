@@ -54,7 +54,14 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
     await a.evaluate(() => documentPictureInPicture.window.close());
   } else t.diagnostic('Document PiP unavailable in this browser; native PiP test skipped.');
   await a.screenshot({ path: 'test-results/room.png', fullPage: true });
-  assert.equal(await pages[2].getByRole('button', { name: '开始投屏' }).isDisabled(), true); await a.getByRole('button', { name: '停止投屏' }).click();
+  const thirdCaster = pages[2];
+  await thirdCaster.getByRole('button', { name: '开始投屏', exact: true }).click();
+  await b.waitForFunction(() => {
+    const videos = [...document.querySelectorAll('video')];
+    return videos.length === 3 && videos.every(video => video.videoWidth > 0 && video.currentTime > 0);
+  });
+  await thirdCaster.getByRole('button', { name: '停止投屏', exact: true }).click();
+  await a.getByRole('button', { name: '停止投屏' }).click();
   await b.waitForFunction(() => document.querySelectorAll('video').length === 1);
   assert.equal(await b.getByRole('button', { name: '停止投屏' }).count(), 1);
   await a.getByRole('button', { name: '开始投屏' }).click();
@@ -62,8 +69,16 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   try { await b.waitForFunction(() => document.querySelector('video')?.videoWidth > 0); }
   catch (e) { t.diagnostic(JSON.stringify(await a.evaluate(() => ({ text: document.body.innerText, peers: window.__pcs.map(p => ({ connection: p.connectionState, signaling: p.signalingState, senders: p.getSenders().map(s => s.track?.readyState) })) })))); throw e; }
   await b.getByRole('button', { name: '重连', exact: true }).click(); await b.waitForFunction(() => document.querySelector('video')?.videoWidth > 0);
-  const third = await browser.newPage(); await third.goto(url); await third.getByLabel('昵称', { exact: true }).fill('C'); await third.getByRole('button', { name: '进入', exact: true }).click(); await third.getByRole('alert').filter({ hasText: '最多同时在线 4 人' }).waitFor();
-  await a.getByRole('button', { name: '退出', exact: true }).click(); await b.getByText('3 / 4 在线').waitFor();
+  const fifth = await browser.newPage();
+  await fifth.goto(url);
+  await fifth.getByLabel('昵称', { exact: true }).fill('E');
+  await fifth.getByRole('button', { name: '进入', exact: true }).click();
+  await fifth.getByText('5 人在线', { exact: true }).waitFor();
+  await fifth.waitForFunction(() => document.querySelector('[data-member="A"] video')?.videoWidth > 0);
+  await fifth.getByRole('button', { name: '退出', exact: true }).click();
+  await b.getByText('4 人在线', { exact: true }).waitFor();
+  await a.getByRole('button', { name: '退出', exact: true }).click();
+  await b.getByText('3 人在线', { exact: true }).waitFor();
   await b.setViewportSize({ width: 390, height: 844 }); assert.equal(await b.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await b.setViewportSize({ width: 1440, height: 900 });
   await b.getByLabel('投屏目标帧率').selectOption('unlimited');
