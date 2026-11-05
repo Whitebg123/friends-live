@@ -16,9 +16,8 @@ export function createApp(options = {}) {
   const production = options.production ?? process.env.NODE_ENV === 'production';
   const origin = options.origin ?? process.env.PUBLIC_ORIGIN;
   const grace = options.grace ?? 30000;
-  const maxMembers = 4, maxSharers = 2;
   const members = new Map(), limits = new Map();
-  const room = { id: random(), epoch: random(), ownerId: null, messages: [] };
+  const room = { id: random(), ownerId: null, messages: [] };
   let shuttingDown = false;
   const app = express();
   app.disable('x-powered-by');
@@ -39,12 +38,13 @@ export function createApp(options = {}) {
   }
   server.on('upgrade', (req, socket, head) => {
     const expected = origin || `${production ? 'https' : 'http'}://${req.headers.host}`;
-    if (req.url !== '/ws' || req.headers.origin !== expected || !allow(`upgrade:${req.socket.remoteAddress}`, 60) || wss.clients.size >= 32) {
+    if (req.url !== '/ws' || req.headers.origin !== expected || !allow(`upgrade:${req.socket.remoteAddress}`, 60)) {
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
   });
-  const publicRoom = () => ({ id: room.id, epoch: room.epoch, ownerId: room.ownerId, maxMembers, maxSharers, members: [...members.values()].map(m => ({ id: m.id, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio, mic: !!m.mic })) });
+  const publicRoom = () => ({ id: room.id, ownerId: room.ownerId, members: [...members.values()].map(m => ({ id: m.id, connectionId: m.connectionId, name: m.name, online: m.ws?.readyState === WebSocket.OPEN, sharing: m.sharing, systemAudio: m.systemAudio, mic: !!m.mic })) });
+  const pairEpoch = (a, b) => a.id < b.id ? `${a.connectionId}:${b.connectionId}` : `${b.connectionId}:${a.connectionId}`;
   const broadcast = data => { for (const m of members.values()) send(m.ws, data); };
   const publish = () => broadcast({ type: 'room', room: publicRoom() });
   const emojiStore = options.emojiStore || new EmojiStore();
@@ -54,7 +54,6 @@ export function createApp(options = {}) {
     if (member.ws) member.ws.member = null;
     members.delete(member.id);
     if (room.ownerId === member.id) room.ownerId = members.keys().next().value || null;
-    room.epoch = random();
     if (!members.size) { room.id = random(); room.messages = []; }
     publish();
   }
@@ -62,17 +61,16 @@ export function createApp(options = {}) {
     clearTimeout(member.timer);
     const old = member.ws;
     if (old && old !== ws) { old.member = null; old.close(4001, 'Session resumed elsewhere'); member.sharing = false; member.systemAudio = false; member.mic = false; }
-    member.ws = ws; ws.member = member;
+    member.ws = ws; member.connectionId = random(); ws.member = member;
     if (isNew) { members.set(member.id, member); if (!room.ownerId) room.ownerId = member.id; }
-    room.epoch = random();
     send(ws, { type: 'welcome', selfId: member.id, token: member.token, room: publicRoom(), messages: room.messages, iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }, ...(process.env.TURN_URLS ? [{ urls: process.env.TURN_URLS.split(',').map(s => s.trim()), username: process.env.TURN_USERNAME, credential: process.env.TURN_CREDENTIAL }] : [])] });
     publish();
   }
   wss.on('connection', (ws, req) => {
-    ws.alive = true; ws.on('pong', () => { ws.alive = true; });
+    ws.alive = true; ws.rateKey = random(); ws.on('pong', () => { ws.alive = true; });
     ws.on('message', async (raw, binary) => {
       const fail = (code, message, requestId) => send(ws, { type: 'error', code, message, requestId });
-      if (!allow(`message:${req.socket.remoteAddress}`, 1200)) { ws.close(4008, 'Rate limited'); return; }
+      if (!allow(`message:${ws.rateKey}`, 1200)) { ws.close(4008, 'Rate limited'); return; }
       let data;
       try { if (binary) throw Error(); data = JSON.parse(raw); if (!data || typeof data !== 'object' || Array.isArray(data) || !valid(data.type, 30)) throw Error(); }
       catch { fail('FORMAT', '无效的消息格式'); return; }
@@ -87,12 +85,15 @@ export function createApp(options = {}) {
             attach(ws, m); return;
           }
           if (!valid(data.name, 32) || !data.name.trim() || /[\u0000-\u001f\u007f]/u.test(data.name)) throw Error('NAME:昵称需为 1–32 个可见字符');
-          if (members.size >= maxMembers) throw Error('FULL:最多同时在线 4 人，断线席位保留 30 秒');
           attach(ws, { id: random(), token: random(), name: data.name.trim(), sharing: false, systemAudio: false }, true); return;
         }
         const member = ws.member;
         if (!member) throw Error('AUTH:请先输入昵称进入');
-        if (type === 'ping') { send(ws, { type: 'ack', requestId }); return; }
+        if (type === 'latency-probe' || type === 'latency-reply') {
+          const target = members.get(data.target);
+          if (!target || target === member || !valid(requestId,64) || !(type === 'latency-probe' ? target.sharing : member.sharing)) return;
+          send(target.ws,{type,from:member.id,requestId}); return;
+        }
         if (type === 'leave') { remove(member); send(ws, { type: 'left' }); return; }
         if (type === 'mic') {
           if (typeof data.enabled !== 'boolean' || (data.target != null && data.target !== member.id)) throw Error('FORBIDDEN:只能开关自己的麦克风');
@@ -101,7 +102,6 @@ export function createApp(options = {}) {
         }
         if (type === 'start' || type === 'stop') {
           if (data.target != null && data.target !== member.id) throw Error('FORBIDDEN:只能控制自己的投屏');
-          if (type === 'start' && !member.sharing && [...members.values()].filter(m => m.sharing).length >= maxSharers) throw Error('SHARE_FULL:已有两人在投屏，请等其中一人停止后再试');
           member.sharing = type === 'start'; member.systemAudio = member.sharing && data.systemAudio === true;
           publish(); send(ws, { type: 'ack', requestId }); return;
         }
@@ -118,7 +118,7 @@ export function createApp(options = {}) {
         }
         if (type === 'signal') {
           const target = members.get(data.target), s = data.signal;
-          if (!target || target.id === member.id || target.ws?.readyState !== WebSocket.OPEN || data.epoch !== room.epoch || !s || typeof s !== 'object' || Array.isArray(s)) throw Error('SIGNAL:无效或过期的信令');
+          if (!target || target.id === member.id || target.ws?.readyState !== WebSocket.OPEN || data.epoch !== pairEpoch(member,target) || !s || typeof s !== 'object' || Array.isArray(s)) throw Error('SIGNAL:无效或过期的信令');
           // Each pair has one deterministic offerer; all pairs negotiate independently.
           const offerer = member.id < target.id;
           if (s.kind === 'ready') { if (offerer) throw Error('SIGNAL:无效协商方向'); }
@@ -128,7 +128,7 @@ export function createApp(options = {}) {
             const c = s.candidate;
             if (!valid(s.negotiation, 64) || !c || typeof c !== 'object' || typeof c.candidate !== 'string' || c.candidate.length > 5000 || (c.sdpMid != null && typeof c.sdpMid !== 'string') || (c.sdpMLineIndex != null && !Number.isInteger(c.sdpMLineIndex))) throw Error('SIGNAL:无效 ICE 候选');
           } else throw Error('SIGNAL:未知信令');
-          send(target.ws, { type: 'signal', from: member.id, epoch: room.epoch, signal: s }); return;
+          send(target.ws, { type: 'signal', from: member.id, epoch: pairEpoch(member,target), signal: s }); return;
         }
         throw Error('TYPE:未知操作');
       } catch (err) { const [code, ...rest] = err.message.split(':'); fail(code, rest.join(':') || '请求无效', requestId); }
@@ -137,7 +137,7 @@ export function createApp(options = {}) {
     ws.on('close', () => {
       const m = ws.member;
       if (!m || m.ws !== ws || shuttingDown) return;
-      m.ws = null; m.sharing = false; m.systemAudio = false; m.mic = false; room.epoch = random(); publish();
+      m.ws = null; m.sharing = false; m.systemAudio = false; m.mic = false; publish();
       m.timer = setTimeout(() => remove(m), grace);
     });
   });

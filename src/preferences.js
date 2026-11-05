@@ -3,8 +3,6 @@ const level = (v, fallback = 1) => typeof v === 'number' && v >= 0 && v <= 1 ? v
 export function loadPreferences() {
   let p; try { p = JSON.parse(localStorage.getItem(KEY)) || {}; } catch { p = {}; }
   return {
-    bitrate: [8, 15, 25, 40].includes(p.bitrate) ? p.bitrate : 15,
-    fps: [30, 40, 60, null].includes(p.fps) ? p.fps : 40,
     micVolume: level(p.micVolume, level(p.sendVolume)),
     systemVolume: level(p.systemVolume, level(p.sendVolume)),
     receiveVolume: level(p.receiveVolume),
