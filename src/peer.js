@@ -32,8 +32,15 @@ export class Peer {
     const display = this.live.displayApproved ? this.live.display : null;
     const tracks = [display?.getVideoTracks()[0], display ? this.live.systemTrack() : null, this.live.micStream?.getAudioTracks()[0]];
     const ts = pc.getTransceivers();
-    try { for (let i = 0; i < 3; i++) if (ts[i]) await ts[i].sender.replaceTrack(tracks[i] || null); }
+    try { await ts[0]?.sender.replaceTrack(tracks[0] || null); }
     catch (e) { if (pc !== this.pc || pc.connectionState === 'closed') { if (this.pc && this.pc !== pc) await this.syncTracks(this.pc); return; } throw e; }
+    const audioResults = await Promise.allSettled(ts.slice(1, 3).map(async (transceiver, index) => {
+      await transceiver.sender.replaceTrack(tracks[index + 1] || null);
+    }));
+    if (pc !== this.pc || pc.connectionState === 'closed') return;
+    if (audioResults.some(result => result.status === 'rejected')) {
+      this.live.emit({ notice: '部分声音无法发送。' });
+    }
     await this.setVideoQuality();
   }
   async offer() {

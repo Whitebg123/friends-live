@@ -21,7 +21,7 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
       navigator.mediaDevices.getUserMedia = async () => new MediaStream([sound()]);
       const supported=navigator.mediaDevices.getSupportedConstraints.bind(navigator.mediaDevices);
       navigator.mediaDevices.getSupportedConstraints=()=>({...supported(),restrictOwnAudio:true});
-      navigator.mediaDevices.getDisplayMedia = async (constraints) => { window.__captureConstraints = constraints; const c = document.createElement('canvas'); c.width = 640; c.height = 360; const ctx = c.getContext('2d'); let i = 0; setInterval(() => { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, 1920, 1080); ctx.fillStyle = '#ddd'; ctx.font = '60px sans-serif'; ctx.fillText(`Test screen ${++i}`, 30, 180); }, 16); const s = c.captureStream(20); if(constraints.audio) { const track=sound(), settings=track.getSettings.bind(track); if(window.__ownAudioIsolated) track.getSettings=()=>({...settings(),restrictOwnAudio:true}); s.addTrack(track); } return s; };
+      navigator.mediaDevices.getDisplayMedia = async (constraints) => { window.__captureConstraints = constraints; const c = document.createElement('canvas'); c.width = 640; c.height = 360; const ctx = c.getContext('2d'); let i = 0; setInterval(() => { ctx.fillStyle = '#111'; ctx.fillRect(0, 0, 1920, 1080); ctx.fillStyle = '#ddd'; ctx.font = '60px sans-serif'; ctx.fillText(`Test screen ${++i}`, 30, 180); }, 16); const s = c.captureStream(20); if(constraints.audio) { const track=sound(), settings=track.getSettings.bind(track); if(window.__ownAudioIsolated) track.getSettings=()=>({...settings(),restrictOwnAudio:true}); track.applyConstraints=async options=>{window.__audioIsolationAttempted=options.restrictOwnAudio;throw new DOMException('Test: audio isolation unavailable','OverconstrainedError');}; s.addTrack(track); } return s; };
     });
     const p = await context.newPage(); p.on('pageerror', e => errors.push(e.message)); await p.goto(url); pages.push(p);
     assert.equal(await p.locator('input[type=password]').count(), 0);
@@ -33,7 +33,8 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   assert.equal(await a.locator('.screen-card[data-member="B"] input[type=range]').count(),2);
   await a.getByRole('button',{name:'画质：最高',exact:true}).waitFor();
   await a.getByRole('button', { name: '开始投屏' }).click(); await b.getByRole('button', { name: '开始投屏' }).click(); assert.equal(await a.evaluate(()=>'frameRate' in window.__captureConstraints.video),false);
-  assert.deepEqual(await a.evaluate(()=>({own:window.__captureConstraints.audio.restrictOwnAudio,self:window.__captureConstraints.selfBrowserSurface})),{own:true,self:'exclude'});
+  assert.equal(await a.evaluate(()=>window.__captureConstraints.audio), true);
+  await a.waitForFunction(()=>window.__audioIsolationAttempted===true);
   await pages[2].waitForFunction(()=>[...document.querySelectorAll('.member-ping')].length===2 && [...document.querySelectorAll('.member-ping')].every(e=>/经服务器约 \d+ ms/.test(e.textContent)));
   assert.equal(await a.locator('.screen-card[data-member="A"] .member-ping').count(),0);
   for (const p of pages) {
@@ -137,4 +138,66 @@ test('two-way screens, audio, chat, danmaku, reconnect, stop independence, nickn
   assert.equal(await b.locator('.app').evaluate(e=>getComputedStyle(e).backgroundImage), 'none');
   t.diagnostic('Muted video previews and PiP; no receive playback during unisolated system audio sharing; restoring playback does not stop video; browser-reported isolation keeps receive playback enabled.');
   assert.deepEqual(errors, []);
+});
+
+test('display video survives a rejected system audio track and supports a manual video-only retry', { timeout: 35000 }, async t => {
+  const app = createApp({ production: false });
+  let browser;
+  app.server.listen(0, '127.0.0.1');
+  await once(app.server, 'listening');
+  t.after(async () => { await browser?.close(); await app.close(); });
+  const url = `http://127.0.0.1:${app.server.address().port}`;
+  const edge = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+  browser = await chromium.launch({ headless: true, ...(existsSync(edge) ? { executablePath: edge } : {}) });
+  const caster = await browser.newPage();
+  const viewer = await browser.newPage();
+  await caster.addInitScript(() => {
+    if (!navigator.mediaDevices) return;
+    const replaceTrack = RTCRtpSender.prototype.replaceTrack;
+    RTCRtpSender.prototype.replaceTrack = function(track) {
+      if (track && track === window.systemTrackForTest) {
+        window.audioRejected = true;
+        return Promise.reject(new DOMException('Test: system audio sender rejected track', 'InvalidModificationError'));
+      }
+      return replaceTrack.call(this, track);
+    };
+    navigator.mediaDevices.getDisplayMedia = async ({ audio }) => {
+      window.captureAttempts = (window.captureAttempts || 0) + 1;
+      if (audio && window.failCapture) throw new DOMException('Test: capture audio unavailable', 'NotReadableError');
+      const canvas = document.createElement('canvas');
+      canvas.width = 320; canvas.height = 180;
+      const paint = canvas.getContext('2d');
+      const stream = canvas.captureStream(15);
+      setInterval(() => { paint.fillStyle = '#398'; paint.fillRect(0, 0, 320, 180); }, 50);
+      if (audio) {
+        const audioContext = new AudioContext();
+        const destination = audioContext.createMediaStreamDestination();
+        window.systemTrackForTest = destination.stream.getAudioTracks()[0];
+        stream.addTrack(window.systemTrackForTest);
+      }
+      return stream;
+    };
+  });
+  for (const [page, name] of [[caster, 'Caster'], [viewer, 'Viewer']]) {
+    await page.goto(url);
+    await page.getByLabel('昵称', { exact: true }).fill(name);
+    await page.getByRole('button', { name: '进入', exact: true }).click();
+  }
+  await caster.getByText(/媒体 1\/1 已连接/).waitFor();
+  const remoteVideo = viewer.locator('[data-member="Caster"] video');
+  await caster.getByRole('button', { name: '开始投屏', exact: true }).click();
+  await caster.waitForFunction(() => window.audioRejected);
+  await remoteVideo.waitFor({ timeout: 5000 });
+  await viewer.waitForFunction(() => document.querySelector('[data-member="Caster"] video')?.videoWidth > 0);
+  await caster.getByRole('button', { name: '停止投屏', exact: true }).click();
+  await remoteVideo.waitFor({ state: 'detached' });
+
+  await caster.evaluate(() => { window.failCapture = true; window.captureAttempts = 0; });
+  await caster.getByRole('button', { name: '开始投屏', exact: true }).click();
+  const videoOnly = caster.getByRole('button', { name: '仅共享画面', exact: true });
+  await videoOnly.waitFor();
+  assert.equal(await caster.evaluate(() => window.captureAttempts), 1);
+  await videoOnly.click();
+  await viewer.waitForFunction(() => document.querySelector('[data-member="Caster"] video')?.videoWidth > 0);
+  assert.equal(await caster.evaluate(() => window.captureAttempts), 2);
 });

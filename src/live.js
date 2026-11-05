@@ -110,33 +110,56 @@ export class Live {
     }
     if(expired)this.emit({latency});
   }
-  async share() {
+  async share(withSound = true) {
     if (this.display || this.capturing) return;
     this.capturing = true;
+    this.emit({ videoOnlyRetry: false, error: '' });
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) throw Error('请使用桌面 Chrome / Edge，通过 HTTPS 或 localhost 打开');
       const video = captureConstraints(this.quality);
-      const supported = navigator.mediaDevices.getSupportedConstraints?.();
-      const audio = { channelCount: { ideal: 2 }, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
-        ...(supported?.restrictOwnAudio ? { restrictOwnAudio: true } : {}) };
       let stream;
-      try { stream = await navigator.mediaDevices.getDisplayMedia({ video, audio, systemAudio: 'include', selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude' }); }
-      catch (e) { if (!['NotReadableError', 'OverconstrainedError'].includes(e.name)) throw e; stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: false, selfBrowserSurface: 'exclude' }); }
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({ video, audio: withSound, systemAudio: withSound ? 'include' : 'exclude' });
+      } catch (error) {
+        if (withSound && ['NotReadableError', 'OverconstrainedError', 'AbortError'].includes(error.name)) {
+          this.emit({ videoOnlyRetry: true });
+          throw Error('浏览器没能同时捕获画面和声音，请点击「仅共享画面」重试。');
+        }
+        throw error;
+      }
       if (!this.state.room || !this.state.connected) { stream.getTracks().forEach(t => t.stop()); throw Error('请连接后再投屏'); }
-      this.displayApproved = false; this.display = stream; stream.getVideoTracks()[0].contentHint = 'motion'; stream.getVideoTracks()[0].onended = () => this.stop().catch(e => this.emit({ error: e.message }));
+      this.displayApproved = false;
+      this.display = stream;
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack?.readyState !== 'live') throw Error('浏览器没有返回可用画面，请重新选择共享窗口。');
+      videoTrack.contentHint = 'motion';
+      videoTrack.onended = () => this.stop().catch(e => this.emit({ error: e.message }));
       const system = this.systemTrack();
       this.protectPlayback(!!system && system.getSettings().restrictOwnAudio !== true);
       if (system) system.onended = () => { if (this.display === stream) this.stopSystemAudio().catch(e=>this.emit({error:e.message})); };
-      this.emit({ localVideo: new MediaStream(stream.getVideoTracks()), systemAudio: !!system });
+      this.emit({ localVideo: new MediaStream([videoTrack]), systemAudio: !!system });
       await this.request({ type: 'start', systemAudio: !!system });
       if (this.display !== stream) return;
       this.displayApproved = true; await this.syncTracks();
       if (system && !this.systemTrack()) await this.stopSystemAudio();
-      if (!system) this.emit({ notice: '未捕获系统音频。请检查浏览器分享对话框中的音频选项。' });
+      if (system && this.systemTrack() === system) void this.isolateSystemAudio(stream, system);
+      if (withSound && !system) this.emit({ notice: '未捕获系统音频。请检查浏览器分享对话框中的音频选项。' });
     } catch (e) { this.stopLocal(); await this.syncTracks().catch(() => {}); if (this.state.connected) this.send({ type: 'stop' }); throw e; }
     finally { this.capturing = false; }
   }
   systemTrack() { return this.display?.getAudioTracks().find(t=>t.readyState==='live'); }
+  async isolateSystemAudio(stream, track) {
+    try {
+      if (!this.state.playbackProtected || !navigator.mediaDevices.getSupportedConstraints?.()?.restrictOwnAudio) return;
+      // Optional audio filtering runs after capture so it cannot block video.
+      await track.applyConstraints({ ...track.getConstraints(), restrictOwnAudio: true });
+      if (this.display === stream && this.systemTrack() === track && track.getSettings().restrictOwnAudio === true) {
+        this.protectPlayback(false);
+      }
+    } catch {
+      // Keep the playback mute when the browser cannot isolate its audio.
+    }
+  }
   protectPlayback(active) {
     // Mute already playing elements before the capture can reach any peer.
     // React keeps newly mounted remote audio elements in the same state.
